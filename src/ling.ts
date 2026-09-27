@@ -1,55 +1,63 @@
-// 加载 .env 环境
-import "dotenv/config";
 
-import OpenAI from "openai";
 import { readFileSync } from "fs";
 import { execSync } from "child_process";
-
-const client = new OpenAI({
-  apiKey: process.env.LING_API_KEY,
-  baseURL: process.env.LING_BASE_URL,
-});
-const MODEL = process.env.LING_MODEL || "deepseek-flash";
-
-type Tool = OpenAI.Chat.ChatCompletionTool;
-type Message = OpenAI.Chat.ChatCompletionMessageParam;
+import type { Message, Tool, ProviderConfig } from "./providers/index.js";
+import { initProvider } from "./providers/index.js";
 
 const tools: Tool[] = [
   {
-    type: "function",
-    function: {
-      name: "read_file",
-      description: "Read the contents of a file at the given path",
-      parameters: {
-        type: "object",
-        properties: {
-          file_path: {
-            type: "string",
-            description: "Absoulute or relative file path",
-          },
+    name: "read_file",
+    description: "Read the contents of a file at the given path",
+    parameters: {
+      type: "object",
+      properties: {
+        file_path: {
+          type: "string",
+          description: "Absolute or relative file path",
         },
-        required: ["file_path"],
       },
+      required: ["file_path"],
     },
   },
   {
-    type: "function",
-    function: {
-      name: "run_command",
-      description: "Run a shell command and return its output",
-      parameters: {
-        type: "object",
-        properties: {
-          command: {
-            type: "string",
-            description: "Shell command to execute",
-          },
-        },
-        required: ["command"],
+    name: "run_command",
+    description: "Run a shell command and return its output",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Shell command to execute" },
       },
+      required: ["command"],
     },
   },
 ];
+
+// === 解析命令行参数 ===
+function parseArgs(): { query: string; config: Partial<ProviderConfig> } {
+  const args = process.argv.slice(2);
+  const config: Partial<ProviderConfig> = {};
+  let query = "";
+
+  for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+      case "--provider":
+      case "-p":
+        config.provider = args[++i] as ProviderConfig["provider"];
+        break;
+      case "--model":
+      case "-m":
+        config.model = args[++i];
+        break;
+      default:
+        query = args[i];
+    }
+  }
+
+  return {
+    query: query || "Read package.json and summarize this project.",
+    config,
+  };
+}
 
 function executeTool(name: string, args: Record<string, string>): string {
   try {
@@ -64,39 +72,44 @@ function executeTool(name: string, args: Record<string, string>): string {
   }
 }
 
-async function agent(userMessage: string) {
+// === Agent 主循环 ===
+async function agent(query: string, config: Partial<ProviderConfig>) {
+  const provider = initProvider(config);
+
   const messages: Message[] = [
-    {
-      role: "system",
-      content:
-        "You are Ling, a helpfule coding assistant. Use tools to answer question.",
-    },
-    { role: "user", content: userMessage },
+    {role: "system", content: "You are Ling, a helpful coding assistant. Use tools to answer querions."},
+    {role: "user", content: query},
   ];
 
-  while (true) {
-    const res = await client.chat.completions.create({
-      model: MODEL,
-      messages,
-      tools,
-    });
-    const choice = res.choices[0];
-    messages.push(choice.message);
+  const MAX_TURNS = 20;
+  for (let turn = 0; turn < MAX_TURNS ; turn ++){
+    const res = await provider.chat(messages, tools);
 
-    if (choice.finish_reason != "tool_calls" || !choice.message.tool_calls) {
-      console.log(choice.message.content);
+    // 把 assistant 消息存入历史
+    messages.push({
+      role: "assistant",
+      content: res.content || "",
+      toolCalls: res.toolCalls.length > 0 ? res.toolCalls : undefined,
+    });
+
+    // 没有工具调用,输出结果,结束
+    if ( res.finishReason !== "tool_calls" || res.toolCalls.length == 0){
+      console.log(res.content);
       return;
     }
 
-    for (const tc of choice.message.tool_calls) {
-      const args = JSON.parse(tc.function.arguments);
-      const result = executeTool(tc.function.name, args);
-      console.log(
-        `[tool] ${tc.function.name}(${JSON.stringify(args)}) -> ${result}`,
-      );
-      messages.push({ role: "tool", tool_call_id: tc.id, content: result });
+    // 执行工具
+    for(const tc of res.toolCalls){
+      const args = JSON.parse(tc.arguments);
+      const result = executeTool(tc.name, args);
+      console.log(`[tool] ${tc.name}(${JSON.stringify(args)}) -> ${result.slice(0,100)}...`);
+      messages.push({role: "tool", toolCallId: tc.id, content: result});
     }
   }
+
+  console.log("[ling] Reached max turns, stopping.");
 }
 
-agent(process.argv[2] || "Read package.json and summarize this project.");
+// === 入口 ===
+const {query, config} = parseArgs();
+agent(query, config);
