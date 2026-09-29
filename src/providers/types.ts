@@ -1,7 +1,7 @@
 
 // 统一消息类型
-/** 工具类型 */
-export interface Tool {
+/** 统一的工具声明：只描述给模型看的接口，不含执行逻辑 */
+export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string,unknown>; // JSON Schema
@@ -44,8 +44,8 @@ export interface StreamChunk {
 /** Provider 接口-所有适配器必须实现这两个方法 */
 export interface LLMProvider {
   readonly name: string;
-  chat(messages: Message[], tools?: Tool[]): Promise<LLMResponse>;
-  stream(messages: Message[], tools?: Tool[]): AsyncIterableIterator<StreamChunk>;
+  chat(messages: Message[], tools?: ToolDefinition[]): Promise<LLMResponse>;
+  stream(messages: Message[], tools?: ToolDefinition[]): AsyncIterableIterator<StreamChunk>;
 }
 
 /** Provider 配置 */

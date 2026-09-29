@@ -1,5 +1,5 @@
 export type {
-  LLMProvider, LLMResponse, Message, Tool, ToolCall, ToolResult,
+  LLMProvider, LLMResponse, Message, ToolDefinition, ToolCall, ToolResult,
   StreamChunk, ProviderConfig,
 } from "./types.js";
 

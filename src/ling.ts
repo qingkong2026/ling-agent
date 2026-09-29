@@ -1,42 +1,16 @@
-
-import { readFileSync } from "fs";
-import { execSync } from "child_process";
-import type { Message, Tool, ProviderConfig } from "./providers/index.js";
+import * as readline from "readline/promises";
+import type { Message, ProviderConfig } from "./providers/index.js";
 import { initProvider } from "./providers/index.js";
+import { createToolRegistry } from "./tool/index.js";
 
-const tools: Tool[] = [
-  {
-    name: "read_file",
-    description: "Read the contents of a file at the given path",
-    parameters: {
-      type: "object",
-      properties: {
-        file_path: {
-          type: "string",
-          description: "Absolute or relative file path",
-        },
-      },
-      required: ["file_path"],
-    },
-  },
-  {
-    name: "run_command",
-    description: "Run a shell command and return its output",
-    parameters: {
-      type: "object",
-      properties: {
-        command: { type: "string", description: "Shell command to execute" },
-      },
-      required: ["command"],
-    },
-  },
-];
+const systemPrompt = `You are ling, a coding assistant. You have access to tools to read, write, edit files , search code, and run commands. Use tools to accomplish tasks step by step.`;
+
+const registry = createToolRegistry();
 
 // === 解析命令行参数 ===
-function parseArgs(): { query: string; config: Partial<ProviderConfig> } {
+function parseArgs(): Partial<ProviderConfig> {
   const args = process.argv.slice(2);
   const config: Partial<ProviderConfig> = {};
-  let query = "";
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -49,67 +23,97 @@ function parseArgs(): { query: string; config: Partial<ProviderConfig> } {
         config.model = args[++i];
         break;
       default:
-        query = args[i];
+        break;
     }
   }
 
-  return {
-    query: query || "Read package.json and summarize this project.",
-    config,
-  };
-}
-
-function executeTool(name: string, args: Record<string, string>): string {
-  try {
-    if (name === "read_file") {
-      return readFileSync(args.file_path, "utf-8");
-    }
-    if (name === "run_command")
-      return execSync(args.command, { encoding: "utf-8", timeout: 30000 });
-    return `Unkonw tool: ${name}`;
-  } catch (e: any) {
-    return `Error: ${e.message}`;
-  }
+  return config;
 }
 
 // === Agent 主循环 ===
-async function agent(query: string, config: Partial<ProviderConfig>) {
+async function agentLoop(
+  query: string,
+  config: Partial<ProviderConfig>,
+  history: Message[],
+) {
   const provider = initProvider(config);
 
-  const messages: Message[] = [
-    {role: "system", content: "You are Ling, a helpful coding assistant. Use tools to answer querions."},
-    {role: "user", content: query},
-  ];
+  history.push({ role: "user", content: query });
 
   const MAX_TURNS = 20;
-  for (let turn = 0; turn < MAX_TURNS ; turn ++){
-    const res = await provider.chat(messages, tools);
+  for (let turn = 0; turn < MAX_TURNS; turn++) {
+    const res = await provider.chat(history, registry.toToolDefinitions());
 
     // 把 assistant 消息存入历史
-    messages.push({
+    history.push({
       role: "assistant",
       content: res.content || "",
       toolCalls: res.toolCalls.length > 0 ? res.toolCalls : undefined,
     });
 
     // 没有工具调用,输出结果,结束
-    if ( res.finishReason !== "tool_calls" || res.toolCalls.length == 0){
-      console.log(res.content);
-      return;
+    if (res.finishReason !== "tool_calls" || res.toolCalls.length == 0) {
+      return res.content ?? "(no response)";
     }
 
     // 执行工具
-    for(const tc of res.toolCalls){
+    for (const tc of res.toolCalls) {
+      const name = tc.name;
       const args = JSON.parse(tc.arguments);
-      const result = executeTool(tc.name, args);
-      console.log(`[tool] ${tc.name}(${JSON.stringify(args)}) -> ${result.slice(0,100)}...`);
-      messages.push({role: "tool", toolCallId: tc.id, content: result});
+      let result: string;
+      try {
+        result = await registry.execute(name, args);
+      } catch (err) {
+        result = `Error: ${(err as Error).message}`;
+      }
+
+      console.log(
+        `[tool] ${tc.name}(${JSON.stringify(args)}) -> ${result.slice(0, 100)}...`,
+      );
+      history.push({ role: "tool", toolCallId: tc.id, content: result });
     }
   }
 
   console.log("[ling] Reached max turns, stopping.");
+  return "(reached max turns)";
 }
 
 // === 入口 ===
-const {query, config} = parseArgs();
-agent(query, config);
+async function main() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const config = parseArgs();
+  const history: Message[] = [];
+
+  // 加载 systemPrompt
+  history.push({
+    role: "system",
+    content: systemPrompt,
+  });
+
+  console.log("Ling Agent — type your request, Ctrl+C to exit\n");
+
+  while (true) {
+    let input: string;
+    try {
+      input = await rl.question("You: ");
+    } catch {
+      break; // stdin 已关闭（Ctrl+D 或管道读完）
+    }
+    if (!input.trim()) continue;
+
+    try {
+      const reply = await agentLoop(input, config, history);
+      console.log(`\nLing: ${reply}\n`);
+    } catch (err) {
+      console.log(`Error: ${(err as Error).message}\n`);
+    }
+  }
+
+  rl.close();
+}
+
+main();

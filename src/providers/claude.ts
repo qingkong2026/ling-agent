@@ -4,12 +4,12 @@ import type {
   LLMResponse,
   Message,
   StreamChunk,
-  Tool,
+  ToolDefinition,
   ToolCall,
 } from "./types.js";
 
-/** 把统一的 Tool 转成 Claude 格式 */
-function toClaudeTools(tools: Tool[]): Anthropic.Tool[] {
+/** 把统一的工具声明转成 Claude 格式 */
+function toClaudeTools(tools: ToolDefinition[]): Anthropic.Tool[] {
   return tools.map((t) => ({
     name: t.name,
     description: t.description,
@@ -104,7 +104,7 @@ export class ClaudeProvider implements LLMProvider {
     this.client = new Anthropic({apiKey});
   }
 
-  async chat(messages: Message[], tools?: Tool[]): Promise<LLMResponse> {
+  async chat(messages: Message[], tools?: ToolDefinition[]): Promise<LLMResponse> {
     const { system, claudeMessages} = splitSystemAndMessages(messages);
 
     const res = await this.client.messages.create({
@@ -125,7 +125,7 @@ export class ClaudeProvider implements LLMProvider {
      }
   }
 
-  async *stream(messages: Message[], tools?: Tool[]): AsyncIterableIterator<StreamChunk> {
+  async *stream(messages: Message[], tools?: ToolDefinition[]): AsyncIterableIterator<StreamChunk> {
     const { system, claudeMessages } = splitSystemAndMessages(messages);
 
     const stream = this.client.messages.stream({

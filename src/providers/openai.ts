@@ -1,9 +1,10 @@
 import OpenAI from "openai";
 import type {
-  LLMProvider, LLMResponse, Message, StreamChunk, Tool, ToolCall,
+  LLMProvider, LLMResponse, Message, StreamChunk, ToolDefinition, ToolCall,
 } from "./types.js"
 
-function toOpenAITools(tools: Tool[]): OpenAI.Chat.ChatCompletionTool[] {
+/** 把统一的工具声明转换成 OpenAI 格式 */
+function toOpenAITools(tools: ToolDefinition[]): OpenAI.Chat.ChatCompletionTool[] {
   return tools.map((t)=>({
     type: "function" as const,
     function: {
@@ -65,7 +66,7 @@ export class OpenAIProvider implements LLMProvider {
     });
   }
 
-  async chat(messages: Message[], tools?: Tool[]): Promise<LLMResponse> {
+  async chat(messages: Message[], tools?: ToolDefinition[]): Promise<LLMResponse> {
     const res = await this.client.chat.completions.create({
       model: this.model,
       messages: toOpenAIMessages(messages),
@@ -84,7 +85,7 @@ export class OpenAIProvider implements LLMProvider {
   }
 
 
-  async *stream(messages: Message[], tools?: Tool[]): AsyncIterableIterator<StreamChunk> {
+  async *stream(messages: Message[], tools?: ToolDefinition[]): AsyncIterableIterator<StreamChunk> {
     const stream = await this.client.chat.completions.create({
       model: this.model,
       messages: toOpenAIMessages(messages),
