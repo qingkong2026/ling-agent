@@ -2,10 +2,22 @@ import * as readline from "readline/promises";
 import type { Message, ProviderConfig } from "./providers/index.js";
 import { initProvider } from "./providers/index.js";
 import { createToolRegistry } from "./tool/index.js";
+import { buildSystemPrompt } from "./context/system-prompts.js";
+import { Compactor } from "./context/compactor.js";
+import { calculateBudget, estimateTokens } from "./context/token-budget.js";
 
-const systemPrompt = `You are ling, a coding assistant. You have access to tools to read, write, edit files , search code, and run commands. Use tools to accomplish tasks step by step.`;
+const CONTEXT_WINDOW = parseInt(process.env.CONTEXT_WINDOW || "32000", 10);
+const cwd = process.cwd();
 
 const registry = createToolRegistry();
+const config = parseArgs();
+const provider = initProvider(config);
+const compactor = new Compactor(provider, {
+  keepRecentTurns: 4,
+  maxHistoryTokens: 50000,
+});
+
+let history: Message[] = [];
 
 // === 解析命令行参数 ===
 function parseArgs(): Partial<ProviderConfig> {
@@ -31,14 +43,14 @@ function parseArgs(): Partial<ProviderConfig> {
 }
 
 // === Agent 主循环 ===
-async function agentLoop(
-  query: string,
-  config: Partial<ProviderConfig>,
-  history: Message[],
-) {
-  const provider = initProvider(config);
-
+async function agentLoop(query: string) {
+  
   history.push({ role: "user", content: query });
+
+  if (compactor.shouldCompact(history)) {
+    console.log("[ling] Context getting large, auto-compacting...");
+    history = await compactor.compact(history);
+  }
 
   const MAX_TURNS = 20;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -80,33 +92,46 @@ async function agentLoop(
 
 // === 入口 ===
 async function main() {
+  // 1.初始化上下文环境
+  const systemPrompt = buildSystemPrompt({ cwd });
+  // 启动时打印预算信息
+  const toolDefs = JSON.stringify(registry.toToolDefinitions());
+  const budget = calculateBudget(CONTEXT_WINDOW, systemPrompt, toolDefs, "");
+  console.log(
+    `[ling] Project detected. System prompt: ${budget.systemPrompt} tokens`,
+  );
+  console.log(
+    `[ling] Budget: ${budget.available} tokens available (${budget.reserved} reserved for tool results)`,
+  );
+
+  history.push({ role: "system", content: systemPrompt });
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
 
-  const config = parseArgs();
-  const history: Message[] = [];
-
-  // 加载 systemPrompt
-  history.push({
-    role: "system",
-    content: systemPrompt,
-  });
-
   console.log("Ling Agent — type your request, Ctrl+C to exit\n");
 
   while (true) {
+    const historyTokens = estimateTokens(JSON.stringify(history));
     let input: string;
     try {
-      input = await rl.question("You: ");
+      input = await rl.question(`[${historyTokens} tokens]> : `);
     } catch {
       break; // stdin 已关闭（Ctrl+D 或管道读完）
     }
     if (!input.trim()) continue;
 
+    // compact 命令: 手动触发压缩
+    if (input.trim() === "/compact") {
+      history = await compactor.compact(history);
+      console.log("[ling] Conversation compacted.");
+      continue;
+    }
+
     try {
-      const reply = await agentLoop(input, config, history);
+      const reply = await agentLoop(input);
       console.log(`\nLing: ${reply}\n`);
     } catch (err) {
       console.log(`Error: ${(err as Error).message}\n`);
