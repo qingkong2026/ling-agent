@@ -23,4 +23,6 @@ export function createToolRegistry(): ToolRegistry {
   return registry;
 }
 
-export { ToolRegistry } from "./types.js"; 
+export { ToolRegistry } from "./types.js";
+export { setAskUserFn } from "./ask-user.js";
+export type { AskFn } from "./ask-user.js"; 

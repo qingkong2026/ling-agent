@@ -1,7 +1,7 @@
 import * as readline from "readline/promises";
 import type { ProviderConfig } from "./providers/index.js";
 import { initProvider, resolveConfig } from "./providers/index.js";
-import { createToolRegistry } from "./tool/index.js";
+import { createToolRegistry, setAskUserFn } from "./tool/index.js";
 import { buildSystemPrompt } from "./context/index.js";
 import { Compactor } from "./context/index.js";
 import {
@@ -18,9 +18,16 @@ import { StreamRenderer } from "./providers/index.js";
 import { ToolCallCollector } from "./providers/index.js";
 import { Session, SessionMetadata, SessionStore } from "./session/index.js";
 
+import {
+  HookEngine,
+  loadHooksConfig,
+  HookContext,
+  HookResult,
+} from "./hooks/index.js";
+
 const CONTEXT_WINDOW = parseInt(process.env.CONTEXT_WINDOW || "32000", 10);
 
-const cwd = process.cwd();
+const projectRoot = process.cwd();
 
 const toolRegistry = createToolRegistry();
 const { cliArgs, providerConfig } = parseArgs();
@@ -39,6 +46,28 @@ const renderer = new StreamRenderer();
 
 // 会话存储管理
 const sessionStore = new SessionStore();
+
+// 加载 Hook 机制
+const hookEngine = new HookEngine();
+const hooksConfig = await loadHooksConfig(projectRoot);
+hookEngine.load(hooksConfig);
+
+/**
+ * hook 失败会被当成"没有拦截"而放行(PreToolUse)或悄悄没执行(PostToolUse),
+ * 这里把失败告诉用户。hook 是辅助能力, 不该影响工具调用的主流程,
+ * 所以只提醒、不拦截。
+ */
+function reportHookFailures(
+  event: HookContext["event"],
+  results: HookResult[],
+): void {
+  for (const r of results) {
+    if (!r.ok) {
+      const detail = (r.error ?? "unknown error").slice(0, 200);
+      renderer.warn(`[hook] ${event} 未生效: ${detail}`);
+    }
+  }
+}
 
 // CLI 参数解析
 interface CliArgs {
@@ -95,7 +124,12 @@ function parseArgs(): {
 // 会话元信息: 只在创建时写入, 记录这次对话发生的环境
 function detectMetadata(): SessionMetadata {
   const { provider, model } = resolveConfig(providerConfig);
-  return { cwd, provider, model, gitBranch: getGitBranch(cwd) };
+  return {
+    cwd: projectRoot,
+    provider,
+    model,
+    gitBranch: getGitBranch(projectRoot),
+  };
 }
 
 // === Agent 主循环 ===
@@ -140,9 +174,20 @@ async function agentLoop(query: string, session: Session) {
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     });
 
+    // 没有工具调用 → 模型已经给出最终回答, 结束
+    if (toolCalls.length === 0) {
+      const stopResults = await hookEngine.trigger({
+        event: "Stop",
+        sessionId: session.id,
+        timestamp: Date.now(),
+      });
+      reportHookFailures("Stop", stopResults);
+      return;
+    }
+
     // 执行工具
     for (const tc of toolCalls) {
-      const name = tc.name;
+      const toolName = tc.name;
       let params: Record<string, unknown>;
       try {
         params = JSON.parse(tc.arguments);
@@ -157,7 +202,7 @@ async function agentLoop(query: string, session: Session) {
       }
 
       // ---- 权限检查：在执行前拦截 ----
-      const allowed = await permissionGuard.check(name, params);
+      const allowed = await permissionGuard.check(toolName, params);
       if (!allowed) {
         session.messages.push({
           role: "tool",
@@ -169,30 +214,66 @@ async function agentLoop(query: string, session: Session) {
 
       // 权限通过, 正常执行
       const summary = JSON.stringify(params).slice(0, 60);
-      renderer.startToolExecution(name, summary);
+      renderer.startToolExecution(toolName, summary);
+
+      // --- PreToolUse Hook ---
+      const preContext: HookContext = {
+        event: "PreToolUse",
+        sessionId: session.id,
+        timestamp: Date.now(),
+        toolCall: { tool: toolName, params: params },
+      };
+      const preResults = await hookEngine.trigger(preContext);
+      reportHookFailures("PreToolUse", preResults);
+
+      // 检查是否被拦截
+      const blocked = preResults.find((r) => r.blocked);
+      if (blocked) {
+        console.log(`[hook] Blocked: ${blocked.blockReason}`);
+        session.messages.push({
+          role: "tool",
+          toolCallId: tc.id,
+          content: `Tool call blocked by hook: ${blocked.blockReason}`,
+        });
+
+        renderer.stopToolExecution(toolName, false);
+        continue;
+      }
+
+      // 按序应用所有改动: engine 也是按同样顺序累计的, 结果一致
+      for (const r of preResults) {
+        if (r.modifiedParams) {
+          params = { ...params, ...r.modifiedParams };
+          console.log(`[hook] Params modified`);
+        }
+      }
 
       // 执行工具调用
       let result: string;
       let success = true;
       try {
-        result = await toolRegistry.execute(name, params);
+        result = await toolRegistry.execute(toolName, params);
       } catch (err) {
         result = `Error: ${(err as Error).message}`;
         success = false;
       }
 
-      renderer.stopToolExecution(name, success);
+      renderer.stopToolExecution(toolName, success);
+
+      // --- PostToolUse Hook ---
+      const postResults = await hookEngine.trigger({
+        event: "PostToolUse",
+        sessionId: session.id,
+        timestamp: Date.now(),
+        toolCall: { tool: toolName, params: params, result },
+      });
+      reportHookFailures("PostToolUse", postResults);
 
       session.messages.push({
         role: "tool",
         toolCallId: tc.id,
         content: result,
       });
-    }
-
-    // 没有工具调用 → 模型已经给出最终回答, 结束
-    if (toolCalls.length === 0) {
-      return;
     }
   }
 
@@ -250,7 +331,7 @@ async function main() {
   }
 
   // 初始化上下文环境: system prompt 是派生状态, 每次启动重建, 拼到会话最前面
-  const systemPrompt = await buildSystemPrompt({ cwd });
+  const systemPrompt = await buildSystemPrompt({ cwd: projectRoot });
   session.messages = [
     { role: "system", content: systemPrompt },
     ...session.messages,
@@ -269,6 +350,7 @@ async function main() {
   console.log(`Project root: ${permissionConfig.projectRoot}`);
   console.log(`Rules loaded: ${permissionConfig.rules.length}\n`);
 
+  // 准备读取用户的输入
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -284,7 +366,26 @@ async function main() {
     return parseConfirmation(answer);
   };
 
+  // ask_user 同样复用宿主这一个 readline, 工具自己不去碰 stdin;
+  // 提问期间还要把 spinner 让出来, 否则用户正在输入的内容每 80ms 被重画盖掉
+  setAskUserFn(async (question) => {
+    renderer.pauseSpinner();
+    try {
+      return await rl.question(`\n🤖 Agent asks: ${question}\n> `);
+    } finally {
+      renderer.resumeSpinner();
+    }
+  });
+
   console.log("Ling Agent — type your request, Ctrl+C to exit\n");
+
+  // 触发 SessionStart Hook
+  const startResults = await hookEngine.trigger({
+    event: "SessionStart",
+    sessionId: session.id,
+    timestamp: Date.now(),
+  });
+  reportHookFailures("SessionStart", startResults);
 
   while (true) {
     const historyTokens = estimateTokens(JSON.stringify(session.messages));

@@ -37,17 +37,24 @@ export class Spinner {
   private frameIdx = 0;
   private label = "";
 
-  start(lael: string): void {
+  start(label: string): void {
     this.stop();
-    this.label = lael;
+    this.label = label;
     this.frameIdx = 0;
+    this.run();
+  }
 
-    this.timer = setInterval(() => {
-      const frame = SPINNER_FRAMES[this.frameIdx % SPINNER_FRAMES.length];
-      // \r 回到行首, \x1b[K 清除到行尾
-      process.stderr.write(`\r${DIM}${frame} ${this.label}${RESET}\x1b[K`);
-      this.frameIdx++;
-    }, 80);
+  /** 暂停但保留状态, 之后可以 resume 接着转 */
+  pause(): void {
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = null;
+    process.stderr.write("\r\x1b[K");
+  }
+
+  resume(): void {
+    if (this.timer || !this.label) return;
+    this.run();
   }
 
   stop(): void {
@@ -56,6 +63,20 @@ export class Spinner {
       this.timer = null;
       process.stderr.write("\r\x1b[K"); // 清理 spinner 行
     }
+    this.label = "";
+  }
+
+  isRunning(): boolean {
+    return this.timer !== null;
+  }
+
+  private run(): void {
+    this.timer = setInterval(() => {
+      const frame = SPINNER_FRAMES[this.frameIdx % SPINNER_FRAMES.length];
+      // \r 回到行首, \x1b[K 清除到行尾
+      process.stderr.write(`\r${DIM}${frame} ${this.label}${RESET}\x1b[K`);
+      this.frameIdx++;
+    }, 80);
   }
 }
 
@@ -119,6 +140,16 @@ export class StreamRenderer {
     this.spinner.start(`${icon} ${name}: ${summary}`);
   }
 
+  /** 要用户输入时让出 spinner 那一行, 否则每 80ms 一次重画会盖掉正在输入的内容 */
+  pauseSpinner(): void {
+    this.spinner.pause();
+  }
+
+  /** 输入结束后继续转 */
+  resumeSpinner(): void {
+    this.spinner.resume();
+  }
+
   /** 工具执行完毕 */
   stopToolExecution(name: string, success: boolean): void {
     this.spinner.stop();
@@ -130,6 +161,15 @@ export class StreamRenderer {
   /** 显示一行提示信息 */
   info(msg: string): void {
     process.stderr.write(`${DIM}${msg}${RESET}\n`);
+  }
+
+  /**
+   * 用户需要知道的警告
+   * spinner 正在转时先抢占它那一行, 否则这行会被下一帧覆盖
+   */
+  warn(msg: string): void {
+    if (this.spinner.isRunning()) process.stderr.write("\r\x1b[K");
+    process.stderr.write(`${YELLOW}${msg}${RESET}\n`);
   }
 
   /** 重置状态（新一轮对话前调用） */
