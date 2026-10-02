@@ -10,6 +10,8 @@ import {
   loadPermissionConfig,
   parseConfirmation,
 } from "./permissions/index.js";
+import { StreamRenderer } from "./providers/renderer.js";
+import { ToolCallCollector } from "./providers/collector.js";
 
 const CONTEXT_WINDOW = parseInt(process.env.CONTEXT_WINDOW || "32000", 10);
 const cwd = process.cwd();
@@ -25,6 +27,9 @@ const compactor = new Compactor(provider, {
 // Permission
 const permissionConfig = loadPermissionConfig();
 const permissionGuard = new PermissionGuard(permissionConfig);
+
+// renderer
+const renderer = new StreamRenderer();
 
 let history: Message[] = [];
 
@@ -55,6 +60,7 @@ function parseArgs(): Partial<ProviderConfig> {
 async function agentLoop(query: string) {
   history.push({ role: "user", content: query });
 
+  // 自动压缩上下文
   if (compactor.shouldCompact(history)) {
     console.log("[ling] Context getting large, auto-compacting...");
     history = await compactor.compact(history);
@@ -62,28 +68,55 @@ async function agentLoop(query: string) {
 
   const MAX_TURNS = 20;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const res = await provider.chat(history, toolRegistry.toToolDefinitions());
+    renderer.reset();
+    const collector = new ToolCallCollector();
+    let fullText = "";
+
+    for await (const chunk of provider.stream(
+      history,
+      toolRegistry.toToolDefinitions(),
+    )) {
+      // 1.渲染到终端
+      renderer.onChunk(chunk);
+
+      // 2.收集文本
+      if (chunk.type == "text") {
+        fullText += chunk.content;
+      }
+
+      // 3.收集工具调用片段
+      collector.feed(chunk);
+    }
+
+    // 收集结果
+    const toolCalls = collector.drain();
 
     // 把 assistant 消息存入历史
     history.push({
       role: "assistant",
-      content: res.content || "",
-      toolCalls: res.toolCalls.length > 0 ? res.toolCalls : undefined,
+      content: fullText || "",
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     });
 
-    // 没有工具调用,输出结果,结束
-    if (res.finishReason !== "tool_calls" || res.toolCalls.length == 0) {
-      return res.content ?? "(no response)";
-    }
-
     // 执行工具
-    for (const tc of res.toolCalls) {
+    for (const tc of toolCalls) {
       const name = tc.name;
-      const params = JSON.parse(tc.arguments);
+      let params: Record<string, unknown>;
+      try {
+        params = JSON.parse(tc.arguments);
+      } catch {
+        // 参数非法: 也必须回一条 tool_result, 否则 tool_use 会失去配对
+        history.push({
+          role: "tool",
+          toolCallId: tc.id,
+          content: "Error: invalid JSON in tool arguments",
+        });
+        continue;
+      }
 
       // ---- 权限检查：在执行前拦截 ----
       const allowed = await permissionGuard.check(name, params);
-      if(!allowed){
+      if (!allowed) {
         history.push({
           role: "tool",
           toolCallId: tc.id,
@@ -93,22 +126,31 @@ async function agentLoop(query: string) {
       }
 
       // 权限通过, 正常执行
+      const summary = JSON.stringify(params).slice(0, 60);
+      renderer.startToolExecution(name, summary);
+
+      // 执行工具调用
       let result: string;
+      let success = true;
       try {
         result = await toolRegistry.execute(name, params);
       } catch (err) {
         result = `Error: ${(err as Error).message}`;
+        success = false;
       }
 
-      console.log(
-        `[tool] ${tc.name}(${JSON.stringify(params)}) -> ${result.slice(0, 100)}...`,
-      );
+      renderer.stopToolExecution(name, success);
+
       history.push({ role: "tool", toolCallId: tc.id, content: result });
+    }
+
+    // 没有工具调用 → 模型已经给出最终回答, 结束
+    if (toolCalls.length === 0) {
+      return;
     }
   }
 
   console.log("[ling] Reached max turns, stopping.");
-  return "(reached max turns)";
 }
 
 // === 入口 ===
@@ -126,8 +168,7 @@ async function main() {
   );
   // Permission rule
   console.log(`Project root: ${permissionConfig.projectRoot}`);
-  console.log(`Rules loaded: ${permissionConfig.rules.length}\n`)
-
+  console.log(`Rules loaded: ${permissionConfig.rules.length}\n`);
 
   history.push({ role: "system", content: systemPrompt });
 
@@ -166,8 +207,7 @@ async function main() {
     }
 
     try {
-      const reply = await agentLoop(input);
-      console.log(`\nLing: ${reply}\n`);
+      await agentLoop(input);
     } catch (err) {
       console.log(`Error: ${(err as Error).message}\n`);
     }

@@ -17,6 +17,16 @@ function toClaudeTools(tools: ToolDefinition[]): Anthropic.Tool[] {
   }));
 }
 
+/** 解析工具调用参数; 非法 JSON 时退回空对象, 避免污染历史后每轮都 parse 失败 */
+function parseToolArguments(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function splitSystemAndMessages(messages: Message[]): {
   system: string | undefined;
   claudeMessages: Anthropic.MessageParam[];
@@ -48,7 +58,7 @@ function splitSystemAndMessages(messages: Message[]): {
               type: "tool_use",
               id: tc.id,
               name: tc.name,
-              input: JSON.parse(tc.arguments),
+              input: parseToolArguments(tc.arguments),
             });
           }
         }
@@ -115,13 +125,16 @@ export class ClaudeProvider implements LLMProvider {
       tools: tools?.length ? toClaudeTools(tools) : undefined,
     })
 
+    const usage = res.usage;
+    
      return {
       content: extractText(res.content),
       toolCalls: extractToolCalls(res.content),
       finishReason: res.stop_reason === "tool_use" ? "tool_calls"
         : res.stop_reason === "end_turn" ? "stop"
         : res.stop_reason === "max_tokens" ? "length"
-        : "unknown", 
+        : "unknown",
+      usage: usage ? { promptTokens: usage.input_tokens, completionTokens: usage.output_tokens} : undefined, 
      }
   }
 
@@ -136,34 +149,61 @@ export class ClaudeProvider implements LLMProvider {
       tools: tools?.length ? toClaudeTools(tools) : undefined,
     });
 
+    // Claude 的增量片段只带 block index, 不带工具调用 id,
+    // 统一层的 index 语义是"第几个工具调用", 所以维护 block index -> 工具调用序号
+    const toolCallIndexByBlock = new Map<number, number>();
+    let toolCallCount = 0;
+
     for await (const event of stream) {
       switch (event.type) {
-        case "content_block_start":
-          if (event.content_block.type === "tool_use") {
+        case "content_block_start": {
+          const block = event.content_block;
+          // tool_use 块: 开始时就带 id 和 name
+          if (block.type === "tool_use") {
+            const index = toolCallCount++;
+            toolCallIndexByBlock.set(event.index, index);
             yield {
               type: "tool_call_start",
-              toolCall: {
-                id: event.content_block.id,
-                name: event.content_block.name,
-              },
+              content: "",
+              toolCallId: block.id,
+              toolName: block.name,
+              index,
             };
           }
           break;
+        }
 
-        case "content_block_delta":
-          if (event.delta.type === "text_delta") {
-            yield { type: "text", content: event.delta.text };
-          } else if (event.delta.type === "input_json_delta") {
+        case "content_block_delta": {
+          const delta = event.delta;
+          if (delta.type === "text_delta") {
+            yield { type: "text", content: delta.text };
+          } else if (delta.type === "input_json_delta") {
+            // 工具参数是 JSON 片段, 对应 tool_call_delta
             yield {
               type: "tool_call_delta",
-              toolCall: { arguments: event.delta.partial_json },
+              content: delta.partial_json,
+              index: toolCallIndexByBlock.get(event.index) ?? 0,
             };
           }
           break;
+        }
 
-        case "content_block_stop":
-          // 简化处理：不区分是文本还是工具结束
+        case "content_block_stop": {
+          // 工具调用块收尾
+          if (toolCallIndexByBlock.has(event.index)) {
+            yield {
+              type: "tool_call_end",
+              content: "",
+              index: toolCallIndexByBlock.get(event.index)!,
+            };
+          }
           break;
+        }
+
+        case "message_stop": {
+          yield { type: "finish", content: "" };
+          break;
+        }
       }
     }
   }

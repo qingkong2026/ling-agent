@@ -27,18 +27,28 @@ export type Message =
   | { role: "assistant"; content: string; toolCalls?: ToolCall[]}
   | { role: "tool"; toolCallId: string ; content: string};
 
+export type StreamChunkType = 
+  | "text"               // 普通文本
+  | "tool_call_start"    // 工具调用开始
+  | "tool_call_delta"    // 工具调用参数的增量片段
+  | "tool_call_end"      // 工具调用结束
+  | "finish" ;           // 整个响应结束
+
 /** 模型返回的统一响应 */
 export interface LLMResponse {
   content: string | null;
   toolCalls: ToolCall[];
   finishReason: "stop" | "tool_calls" | "length" | "unknown";
+  usage?: { promptTokens: number ; completionTokens: number };
 }
 
 /** 流式响应返回的 chunk */
 export interface StreamChunk {
-  type: "text" | "tool_call_start" | "tool_call_delta" | "tool_call_end";
-  content?: string;
-  toolCall?: Partial<ToolCall>;
+  type: StreamChunkType,
+  content: string;        // text 类型时是文本类型, tool_call_delta 时是参数 JSON 片段
+  toolCallId?: string;   // 工具调用的唯一 ID
+  toolName?: string;    //  仅在 tool_call_start 时出现
+  index?: number;       //  同一响应中第几个工具调用
 }
 
 /** Provider 接口-所有适配器必须实现这两个方法 */
