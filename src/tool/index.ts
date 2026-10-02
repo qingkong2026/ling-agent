@@ -7,6 +7,7 @@ import { globTool } from "./glob.js";
 import { bashTool } from "./bash.js";
 import { listFilesTool } from "./list-files.js";
 import { askUserTool } from "./ask-user.js";
+import { memoryTool } from "./memory.js"
 
 export function createToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
@@ -18,6 +19,7 @@ export function createToolRegistry(): ToolRegistry {
   registry.register(bashTool);
   registry.register(listFilesTool);
   registry.register(askUserTool);
+  registry.register(memoryTool);
   return registry;
 }
 

@@ -1,24 +1,30 @@
 import * as readline from "readline/promises";
-import type { Message, ProviderConfig } from "./providers/index.js";
-import { initProvider } from "./providers/index.js";
+import type { ProviderConfig } from "./providers/index.js";
+import { initProvider, resolveConfig } from "./providers/index.js";
 import { createToolRegistry } from "./tool/index.js";
-import { buildSystemPrompt } from "./context/system-prompts.js";
-import { Compactor } from "./context/compactor.js";
-import { calculateBudget, estimateTokens } from "./context/token-budget.js";
+import { buildSystemPrompt } from "./context/index.js";
+import { Compactor } from "./context/index.js";
+import {
+  calculateBudget,
+  estimateTokens,
+  getGitBranch,
+} from "./context/index.js";
 import {
   PermissionGuard,
   loadPermissionConfig,
   parseConfirmation,
 } from "./permissions/index.js";
-import { StreamRenderer } from "./providers/renderer.js";
-import { ToolCallCollector } from "./providers/collector.js";
+import { StreamRenderer } from "./providers/index.js";
+import { ToolCallCollector } from "./providers/index.js";
+import { Session, SessionMetadata, SessionStore } from "./session/index.js";
 
 const CONTEXT_WINDOW = parseInt(process.env.CONTEXT_WINDOW || "32000", 10);
+
 const cwd = process.cwd();
 
 const toolRegistry = createToolRegistry();
-const argsConfig = parseArgs();
-const provider = initProvider(argsConfig);
+const { cliArgs, providerConfig } = parseArgs();
+const provider = initProvider(providerConfig);
 const compactor = new Compactor(provider, {
   keepRecentTurns: 4,
   maxHistoryTokens: 50000,
@@ -31,39 +37,75 @@ const permissionGuard = new PermissionGuard(permissionConfig);
 // renderer
 const renderer = new StreamRenderer();
 
-let history: Message[] = [];
+// 会话存储管理
+const sessionStore = new SessionStore();
+
+// CLI 参数解析
+interface CliArgs {
+  continue: boolean; // --continue：恢复最近一次会话
+  resume?: string; // --resume <id>：恢复指定会话
+  name?: string; // --name <name>：给会话命名
+  listSessions: boolean; // --list-sessions：列出历史
+}
 
 // === 解析命令行参数 ===
-function parseArgs(): Partial<ProviderConfig> {
+function parseArgs(): {
+  cliArgs: CliArgs;
+  providerConfig: Partial<ProviderConfig>;
+} {
   const args = process.argv.slice(2);
-  const config: Partial<ProviderConfig> = {};
+
+  const providerConfig: Partial<ProviderConfig> = {};
+  const cliArgs: CliArgs = { continue: false, listSessions: false };
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case "--provider":
       case "-p":
-        config.provider = args[++i] as ProviderConfig["provider"];
+        providerConfig.provider = args[++i] as ProviderConfig["provider"];
         break;
       case "--model":
       case "-m":
-        config.model = args[++i];
+        providerConfig.model = args[++i];
+        break;
+      case "--continue":
+      case "-c":
+        cliArgs.continue = true;
+        break;
+      case "--resume":
+      case "-r":
+        cliArgs.resume = args[++i];
+        break;
+      case "--name":
+      case "-n":
+        cliArgs.name = args[++i];
+        break;
+      case "--list-sessions":
+      case "-l":
+        cliArgs.listSessions = true;
         break;
       default:
         break;
     }
   }
 
-  return config;
+  return { cliArgs, providerConfig };
+}
+
+// 会话元信息: 只在创建时写入, 记录这次对话发生的环境
+function detectMetadata(): SessionMetadata {
+  const { provider, model } = resolveConfig(providerConfig);
+  return { cwd, provider, model, gitBranch: getGitBranch(cwd) };
 }
 
 // === Agent 主循环 ===
-async function agentLoop(query: string) {
-  history.push({ role: "user", content: query });
+async function agentLoop(query: string, session: Session) {
+  session.messages.push({ role: "user", content: query });
 
   // 自动压缩上下文
-  if (compactor.shouldCompact(history)) {
+  if (compactor.shouldCompact(session.messages)) {
     console.log("[ling] Context getting large, auto-compacting...");
-    history = await compactor.compact(history);
+    session.messages = await compactor.compact(session.messages);
   }
 
   const MAX_TURNS = 20;
@@ -73,7 +115,7 @@ async function agentLoop(query: string) {
     let fullText = "";
 
     for await (const chunk of provider.stream(
-      history,
+      session.messages,
       toolRegistry.toToolDefinitions(),
     )) {
       // 1.渲染到终端
@@ -92,7 +134,7 @@ async function agentLoop(query: string) {
     const toolCalls = collector.drain();
 
     // 把 assistant 消息存入历史
-    history.push({
+    session.messages.push({
       role: "assistant",
       content: fullText || "",
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
@@ -106,7 +148,7 @@ async function agentLoop(query: string) {
         params = JSON.parse(tc.arguments);
       } catch {
         // 参数非法: 也必须回一条 tool_result, 否则 tool_use 会失去配对
-        history.push({
+        session.messages.push({
           role: "tool",
           toolCallId: tc.id,
           content: "Error: invalid JSON in tool arguments",
@@ -117,7 +159,7 @@ async function agentLoop(query: string) {
       // ---- 权限检查：在执行前拦截 ----
       const allowed = await permissionGuard.check(name, params);
       if (!allowed) {
-        history.push({
+        session.messages.push({
           role: "tool",
           toolCallId: tc.id,
           content: `Permission denied: this operation was blocked by the permission system. Try a different approach.`,
@@ -141,7 +183,11 @@ async function agentLoop(query: string) {
 
       renderer.stopToolExecution(name, success);
 
-      history.push({ role: "tool", toolCallId: tc.id, content: result });
+      session.messages.push({
+        role: "tool",
+        toolCallId: tc.id,
+        content: result,
+      });
     }
 
     // 没有工具调用 → 模型已经给出最终回答, 结束
@@ -155,8 +201,61 @@ async function agentLoop(query: string) {
 
 // === 入口 ===
 async function main() {
-  // 1.初始化上下文环境
-  const systemPrompt = buildSystemPrompt({ cwd });
+  // --list-sessions: 打印后退出
+  if (cliArgs.listSessions) {
+    const sessions = await sessionStore.list();
+    if (sessions.length === 0) {
+      console.log("No sessions found");
+      return;
+    }
+    console.log("Sessions:\n");
+    for (const s of sessions) {
+      const date = new Date(s.updatedAt).toLocaleString();
+      const label = s.name ? `${s.name}` : s.id.slice(0, 8);
+      const preview = s.lastUserMessage ?? "(empty)";
+      console.log(`  ${label}  ${s.messageCount} msgs  ${date}`);
+      console.log(`    ${preview}\n`);
+    }
+    return;
+  }
+
+  // 决定是新建还是恢复会话
+  let session: Session;
+
+  if (cliArgs.continue) {
+    const latestId = await sessionStore.getLatestId();
+    if (!latestId) {
+      console.log("No previous session found. Starting new session.");
+      session = await sessionStore.create(detectMetadata(), cliArgs.name);
+    } else {
+      session = (await sessionStore.load(latestId))!;
+      console.log(
+        `Resuming session ${session.id.slice(0, 8)}... (${session.messages.length} messages)`,
+      );
+    }
+  } else if (cliArgs.resume) {
+    // 加载指定会话
+    const loaded = await sessionStore.load(cliArgs.resume);
+    if (!loaded) {
+      console.error(`Session not found: ${cliArgs.resume}`);
+      process.exit(1);
+    }
+    session = loaded;
+    console.log(
+      `Resuming session ${session.id.slice(0, 8)}... (${session.messages.length} messages)`,
+    );
+  } else {
+    session = await sessionStore.create(detectMetadata(), cliArgs.name);
+    console.log(`New session: ${session.id.slice(0, 8)}`);
+  }
+
+  // 初始化上下文环境: system prompt 是派生状态, 每次启动重建, 拼到会话最前面
+  const systemPrompt = await buildSystemPrompt({ cwd });
+  session.messages = [
+    { role: "system", content: systemPrompt },
+    ...session.messages,
+  ];
+
   // 启动时打印预算信息
   const toolDefs = JSON.stringify(toolRegistry.toToolDefinitions());
   const budget = calculateBudget(CONTEXT_WINDOW, systemPrompt, toolDefs, "");
@@ -169,8 +268,6 @@ async function main() {
   // Permission rule
   console.log(`Project root: ${permissionConfig.projectRoot}`);
   console.log(`Rules loaded: ${permissionConfig.rules.length}\n`);
-
-  history.push({ role: "system", content: systemPrompt });
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -190,7 +287,7 @@ async function main() {
   console.log("Ling Agent — type your request, Ctrl+C to exit\n");
 
   while (true) {
-    const historyTokens = estimateTokens(JSON.stringify(history));
+    const historyTokens = estimateTokens(JSON.stringify(session.messages));
     let input: string;
     try {
       input = await rl.question(`[${historyTokens} tokens]> : `);
@@ -201,13 +298,17 @@ async function main() {
 
     // compact 命令: 手动触发压缩
     if (input.trim() === "/compact") {
-      history = await compactor.compact(history);
+      session.messages = await compactor.compact(session.messages);
+      await sessionStore.save(session);
       console.log("[ling] Conversation compacted.");
       continue;
     }
 
     try {
-      await agentLoop(input);
+      await agentLoop(input, session);
+
+      // 每轮对话后自动保存
+      await sessionStore.save(session);
     } catch (err) {
       console.log(`Error: ${(err as Error).message}\n`);
     }

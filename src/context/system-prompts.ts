@@ -1,5 +1,6 @@
 import { detectProject, type ProjectInfo } from "./project-detectors.js";
 import { loadLingMdFile, type LingMdResult } from "./ling-md.js";
+import { memoryStore } from "../session/index.js";
 
 export interface SystemPromptOption {
   cwd: string;
@@ -58,27 +59,46 @@ function buildLingMdLayer(lingMds: LingMdResult[]): string {
   if (lingMds.length === 0) return "";
 
   const parts: string[] = ["## Project Instructions (from .ling.md)"];
-  for(const md of lingMds){
-    parts.push(`<!-- source: ${md.path} -->`)
+  for (const md of lingMds) {
+    parts.push(`<!-- source: ${md.path} -->`);
     parts.push(md.content);
     parts.push("");
   }
   return parts.join("\n");
 }
 
-// 组装完整 System Prompt 
-export function buildSystemPrompt(options: SystemPromptOption): string {
+// 第五层: Memory
+async function buildMemoryLayer(): Promise<string> {
+  const memoryContext = await memoryStore.loadForContext();
+  const parts: string[] = [];
+  if (memoryContext) {
+    console.log(
+      `Loaded ${memoryContext.split("\n").length} lines of memory context.`,
+    );
+    parts.push("## Memory");
+    parts.push(memoryContext);
+  }
+  return parts.join("\n");
+}
+
+// 组装完整 System Prompt
+export async function buildSystemPrompt(
+  options: SystemPromptOption,
+): Promise<string> {
   const project = detectProject(options.cwd);
   const lingMds = loadLingMdFile(options.cwd);
+
+  const memoryLayer = await buildMemoryLayer();
 
   const sections = [
     LAYER_ROLE,
     LAYER_RULES,
     buildProjectLayer(project),
     buildLingMdLayer(lingMds),
+    memoryLayer,
   ];
 
-  if (options.customRules){
+  if (options.customRules) {
     sections.push(`## Addtional Rules\n${options.customRules}`);
   }
 

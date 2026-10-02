@@ -7,3 +7,5 @@ export { DeepseekProvider } from "./deepseek.js";
 export { ClaudeProvider } from "./claude.js";
 export { OpenAIProvider } from "./openai.js";
 export { createProvider, resolveConfig, initProvider } from "./factory.js";
+export { ToolCallCollector  } from "./collector.js";
+export { StreamRenderer } from "./renderer.js";

@@ -92,6 +92,21 @@ function getGitInfo(cwd: string): { gitStatus: string; recentCommits: string } {
   }
 }
 
+/** 获取当前 git 分支名 */
+export function getGitBranch(cwd: string): string | undefined {
+  try {
+    // --show-current 在 detached HEAD 时返回空串, 会被下面的 || undefined 兜住
+    const branch = execSync("git branch --show-current", {
+      cwd,
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
+    return branch || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** 获取项目结构树 */
 function getDirectoryTree(cwd: string, maxDepth = 2, prefix = "") {
   const IGNORE = new Set([
