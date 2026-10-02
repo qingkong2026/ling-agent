@@ -1,0 +1,16 @@
+{
+  "rules": [
+    { "tool": "bash", "pattern": "git add ", "action": "allow" },
+    { "tool": "bash", "pattern": "git commit ", "action": "allow" },
+    { "tool": "bash", "pattern": "git checkout ", "action": "allow" },
+    { "tool": "bash", "pattern": "git switch ", "action": "allow" },
+    { "tool": "bash", "pattern": "git restore ", "action": "allow" },
+    { "tool": "bash", "pattern": "git stash", "action": "allow" },
+    { "tool": "bash", "pattern": "git branch", "action": "allow" },
+    { "tool": "bash", "pattern": "npm install", "action": "allow" },
+    { "tool": "bash", "pattern": "npm ci", "action": "allow" },
+    { "tool": "bash", "pattern": "tsc", "action": "allow" },
+    { "tool": "bash", "pattern": "eslint", "action": "allow" },
+    { "tool": "bash", "pattern": "prettier", "action": "allow" }
+  ]
+}

@@ -5,10 +5,11 @@ import { DeepseekProvider } from "./deepseek.js";
 import { ClaudeProvider } from "./claude.js";
 import { OpenAIProvider } from "./openai.js";
 
+const LING_JSON = ".ling/.ling.json"
 
 /** 从 .ling.json 读取配置 */
 function loadConfigFile(): Partial<ProviderConfig> | null {
-  const configPath = resolve(process.cwd(), ".ling.json");
+  const configPath = resolve(process.cwd(), LING_JSON);
   if(!existsSync(configPath)) return null;
   try {
     return JSON.parse(readFileSync(configPath, "utf-8"));
