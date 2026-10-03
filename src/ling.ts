@@ -1,138 +1,37 @@
+// src/ling.ts — REPL 入口
+//
+// 组件的创建全部交给 createConfig()(见 ./config/config.ts), 这里只负责:
+// 解析启动意图(恢复/新建会话)、把宿主 I/O(readline)接上去、跑主循环。
+
 import * as readline from "readline/promises";
-import type { ProviderConfig } from "./providers/index.js";
-import { initProvider, resolveConfig } from "./providers/index.js";
-import { createToolRegistry, setAskUserFn } from "./tool/index.js";
-import { buildSystemPrompt } from "./context/index.js";
-import { Compactor } from "./context/index.js";
-import {
-  calculateBudget,
-  estimateTokens,
-  getGitBranch,
-} from "./context/index.js";
-import {
-  PermissionGuard,
-  loadPermissionConfig,
-  parseConfirmation,
-} from "./permissions/index.js";
-import { StreamRenderer } from "./providers/index.js";
+import { calculateBudget, estimateTokens } from "./context/index.js";
+import { parseConfirmation } from "./permissions/index.js";
 import { ToolCallCollector } from "./providers/index.js";
-import { Session, SessionMetadata, SessionStore } from "./session/index.js";
-
-import {
-  HookEngine,
-  loadHooksConfig,
-  HookContext,
-  HookResult,
-} from "./hooks/index.js";
-import { loadMcpServers, shutdownMcpServers } from "./mcp/index.js";
-
-const CONTEXT_WINDOW = parseInt(process.env.CONTEXT_WINDOW || "32000", 10);
-
-const projectRoot = process.cwd();
-
-const toolRegistry = createToolRegistry();
-const { cliArgs, providerConfig } = parseArgs();
-const provider = initProvider(providerConfig);
-const compactor = new Compactor(provider, {
-  keepRecentTurns: 4,
-  maxHistoryTokens: 50000,
-});
-
-// Permission
-const permissionConfig = loadPermissionConfig();
-const permissionGuard = new PermissionGuard(permissionConfig);
-
-// renderer
-const renderer = new StreamRenderer();
-
-// 会话存储管理
-const sessionStore = new SessionStore();
-
-// 加载 Hook 机制
-const hookEngine = new HookEngine();
-const hooksConfig = await loadHooksConfig(projectRoot);
-hookEngine.load(hooksConfig);
+import { createConfig, detectMetadata } from "./config/config.js";
+import type { LingApp } from "./config/config.js";
+import type { Session } from "./session/index.js";
+import type { HookContext, HookResult } from "./hooks/index.js";
 
 /**
  * hook 失败提醒
  */
 function reportHookFailures(
+  app: LingApp,
   event: HookContext["event"],
   results: HookResult[],
 ): void {
   for (const r of results) {
     if (!r.ok) {
       const detail = (r.error ?? "unknown error").slice(0, 200);
-      renderer.warn(`[hook] ${event} 未生效: ${detail}`);
+      app.renderer.warn(`[hook] ${event} 未生效: ${detail}`);
     }
   }
-}
-
-// CLI 参数解析
-interface CliArgs {
-  continue: boolean; // --continue：恢复最近一次会话
-  resume?: string; // --resume <id>：恢复指定会话
-  name?: string; // --name <name>：给会话命名
-  listSessions: boolean; // --list-sessions：列出历史
-}
-
-// === 解析命令行参数 ===
-function parseArgs(): {
-  cliArgs: CliArgs;
-  providerConfig: Partial<ProviderConfig>;
-} {
-  const args = process.argv.slice(2);
-
-  const providerConfig: Partial<ProviderConfig> = {};
-  const cliArgs: CliArgs = { continue: false, listSessions: false };
-
-  for (let i = 0; i < args.length; i++) {
-    switch (args[i]) {
-      case "--provider":
-      case "-p":
-        providerConfig.provider = args[++i] as ProviderConfig["provider"];
-        break;
-      case "--model":
-      case "-m":
-        providerConfig.model = args[++i];
-        break;
-      case "--continue":
-      case "-c":
-        cliArgs.continue = true;
-        break;
-      case "--resume":
-      case "-r":
-        cliArgs.resume = args[++i];
-        break;
-      case "--name":
-      case "-n":
-        cliArgs.name = args[++i];
-        break;
-      case "--list-sessions":
-      case "-l":
-        cliArgs.listSessions = true;
-        break;
-      default:
-        break;
-    }
-  }
-
-  return { cliArgs, providerConfig };
-}
-
-// 会话元信息: 只在创建时写入, 记录这次对话发生的环境
-function detectMetadata(): SessionMetadata {
-  const { provider, model } = resolveConfig(providerConfig);
-  return {
-    cwd: projectRoot,
-    provider,
-    model,
-    gitBranch: getGitBranch(projectRoot),
-  };
 }
 
 // === Agent 主循环 ===
-async function agentLoop(query: string, session: Session) {
+async function agentLoop(query: string, session: Session, app: LingApp) {
+  const { provider, registry, renderer, compactor, guard, hooks } = app;
+
   session.messages.push({ role: "user", content: query });
 
   // 自动压缩上下文
@@ -149,7 +48,7 @@ async function agentLoop(query: string, session: Session) {
 
     for await (const chunk of provider.stream(
       session.messages,
-      toolRegistry.toToolDefinitions(),
+      registry.toToolDefinitions(),
     )) {
       // 1.渲染到终端
       renderer.onChunk(chunk);
@@ -175,12 +74,12 @@ async function agentLoop(query: string, session: Session) {
 
     // 没有工具调用 → 模型已经给出最终回答, 结束
     if (toolCalls.length === 0) {
-      const stopResults = await hookEngine.trigger({
+      const stopResults = await hooks.trigger({
         event: "Stop",
         sessionId: session.id,
         timestamp: Date.now(),
       });
-      reportHookFailures("Stop", stopResults);
+      reportHookFailures(app, "Stop", stopResults);
       return;
     }
 
@@ -201,7 +100,7 @@ async function agentLoop(query: string, session: Session) {
       }
 
       // ---- 权限检查：在执行前拦截 ----
-      const allowed = await permissionGuard.check(toolName, params);
+      const allowed = await guard.check(toolName, params);
       if (!allowed) {
         session.messages.push({
           role: "tool",
@@ -222,8 +121,8 @@ async function agentLoop(query: string, session: Session) {
         timestamp: Date.now(),
         toolCall: { tool: toolName, params: params },
       };
-      const preResults = await hookEngine.trigger(preContext);
-      reportHookFailures("PreToolUse", preResults);
+      const preResults = await hooks.trigger(preContext);
+      reportHookFailures(app, "PreToolUse", preResults);
 
       // 检查是否被拦截
       const blocked = preResults.find((r) => r.blocked);
@@ -248,10 +147,12 @@ async function agentLoop(query: string, session: Session) {
       }
 
       // 执行工具调用
+      // agent 工具走的是同一条路: 它自己持有 spawner, 不再是主循环的特判
       let result: string;
       let success = true;
+
       try {
-        result = await toolRegistry.execute(toolName, params);
+        result = await registry.execute(toolName, params);
       } catch (err) {
         result = `Error: ${(err as Error).message}`;
         success = false;
@@ -260,13 +161,13 @@ async function agentLoop(query: string, session: Session) {
       renderer.stopToolExecution(toolName, success);
 
       // --- PostToolUse Hook ---
-      const postResults = await hookEngine.trigger({
+      const postResults = await hooks.trigger({
         event: "PostToolUse",
         sessionId: session.id,
         timestamp: Date.now(),
         toolCall: { tool: toolName, params: params, result },
       });
-      reportHookFailures("PostToolUse", postResults);
+      reportHookFailures(app, "PostToolUse", postResults);
 
       session.messages.push({
         role: "tool",
@@ -281,21 +182,45 @@ async function agentLoop(query: string, session: Session) {
 
 // === 入口 ===
 async function main() {
+  let app: LingApp;
+  try {
+    app = await createConfig();
+  } catch (err) {
+    // 配置错误(缺 key 等)在 CLI 边界上才收敛成退出码
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
+
+  const {
+    cliArgs,
+    providerConfig,
+    projectRoot,
+    contextWindow,
+    registry,
+    permissionConfig,
+    renderer,
+    sessions,
+    hooks,
+    systemPrompt,
+  } = app;
+
   // --list-sessions: 打印后退出
   if (cliArgs.listSessions) {
-    const sessions = await sessionStore.list();
-    if (sessions.length === 0) {
+    const list = await sessions.list();
+    if (list.length === 0) {
       console.log("No sessions found");
       return;
     }
     console.log("Sessions:\n");
-    for (const s of sessions) {
+    for (const s of list) {
       const date = new Date(s.updatedAt).toLocaleString();
       const label = s.name ? `${s.name}` : s.id.slice(0, 8);
       const preview = s.lastUserMessage ?? "(empty)";
       console.log(`  ${label}  ${s.messageCount} msgs  ${date}`);
       console.log(`    ${preview}\n`);
     }
+    // createConfig 已经把 MCP 子进程拉起来了, 提前返回也要收尸
+    await app.shutdown();
     return;
   }
 
@@ -303,19 +228,19 @@ async function main() {
   let session: Session;
 
   if (cliArgs.continue) {
-    const latestId = await sessionStore.getLatestId();
+    const latestId = await sessions.getLatestId();
     if (!latestId) {
       console.log("No previous session found. Starting new session.");
-      session = await sessionStore.create(detectMetadata(), cliArgs.name);
+      session = await sessions.create(detectMetadata(projectRoot, providerConfig), cliArgs.name);
     } else {
-      session = (await sessionStore.load(latestId))!;
+      session = (await sessions.load(latestId))!;
       console.log(
         `Resuming session ${session.id.slice(0, 8)}... (${session.messages.length} messages)`,
       );
     }
   } else if (cliArgs.resume) {
     // 加载指定会话
-    const loaded = await sessionStore.load(cliArgs.resume);
+    const loaded = await sessions.load(cliArgs.resume);
     if (!loaded) {
       console.error(`Session not found: ${cliArgs.resume}`);
       process.exit(1);
@@ -325,20 +250,8 @@ async function main() {
       `Resuming session ${session.id.slice(0, 8)}... (${session.messages.length} messages)`,
     );
   } else {
-    session = await sessionStore.create(detectMetadata(), cliArgs.name);
+    session = await sessions.create(detectMetadata(projectRoot, providerConfig), cliArgs.name);
     console.log(`New session: ${session.id.slice(0, 8)}`);
-  }
-
-  // 加载 MCP server
-  const { clients: mcpClients, tools: mcpTools } = await loadMcpServers(projectRoot);
-  // 重名只跳过并告警：ToolRegistry.register 会抛，不能因为一个坏 server
-  // 把整个 agent 拦在启动阶段
-  for (const tool of mcpTools) {
-    if (toolRegistry.get(tool.name)) {
-      console.error(`[mcp] 工具 ${tool.name} 与已注册工具重名，已跳过`);
-      continue;
-    }
-    toolRegistry.register(tool);
   }
 
   // 退出时收掉 MCP 子进程, 否则它们会被 reparent 留在系统里
@@ -346,23 +259,21 @@ async function main() {
   async function shutdown(code: number): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
-    await shutdownMcpServers(mcpClients).catch(() => {});
+    await app.shutdown().catch(() => {});
     process.exit(code);
   }
   // 挂了 SIGINT handler 后必须显式 exit, 否则 Ctrl+C 不再能终止进程
   process.on("SIGINT", () => void shutdown(130));
   process.on("SIGTERM", () => void shutdown(0));
 
-  // 初始化上下文环境: system prompt 是派生状态, 每次启动重建, 拼到会话最前面
-  const systemPrompt = await buildSystemPrompt({ cwd: projectRoot });
+  // 启动时打印预算信息
   session.messages = [
-    { role: "system", content: systemPrompt },
+    { role: "system" as const, content: systemPrompt },
     ...session.messages,
   ];
 
-  // 启动时打印预算信息
-  const toolDefs = JSON.stringify(toolRegistry.toToolDefinitions());
-  const budget = calculateBudget(CONTEXT_WINDOW, systemPrompt, toolDefs, "");
+  const toolDefs = JSON.stringify(registry.toToolDefinitions());
+  const budget = calculateBudget(contextWindow, systemPrompt, toolDefs, "");
   console.log(
     `[ling] Project detected. System prompt: ${budget.systemPrompt} tokens`,
   );
@@ -379,36 +290,38 @@ async function main() {
     output: process.stdout,
   });
 
-  // 权限确认复用 REPL 自己的 readline,避免抢 stdin
-  permissionGuard.confirmFn = async (tool, arg, reason) => {
-    const display = arg.length > 80 ? arg.slice(0, 77) + "..." : arg;
-    console.error(
-      `\n[permission] ${tool}: ${display}${reason ? ` (${reason})` : ""}`,
-    );
-    const answer = await rl.question("Allow? [Y/n]: ");
-    return parseConfirmation(answer);
-  };
-
-  // ask_user 同样复用宿主这一个 readline, 工具自己不去碰 stdin;
-  // 提问期间还要把 spinner 让出来, 否则用户正在输入的内容每 80ms 被重画盖掉
-  setAskUserFn(async (question) => {
-    renderer.pauseSpinner();
-    try {
-      return await rl.question(`\n🤖 Agent asks: ${question}\n> `);
-    } finally {
-      renderer.resumeSpinner();
-    }
+  // 宿主 I/O 就绪, 一次性把两个通道回填给 app:
+  // 权限确认和 ask_user 都复用 REPL 自己这一个 readline, 避免抢 stdin
+  app.attachHostIO({
+    confirm: async (tool, arg, reason) => {
+      const display = arg.length > 80 ? arg.slice(0, 77) + "..." : arg;
+      console.error(
+        `\n[permission] ${tool}: ${display}${reason ? ` (${reason})` : ""}`,
+      );
+      const answer = await rl.question("Allow? [Y/n]: ");
+      return parseConfirmation(answer);
+    },
+    // ask_user 提问期间要把 spinner 让出来,
+    // 否则用户正在输入的内容每 80ms 被重画盖掉
+    ask: async (question) => {
+      renderer.pauseSpinner();
+      try {
+        return await rl.question(`\n🤖 Agent asks: ${question}\n> `);
+      } finally {
+        renderer.resumeSpinner();
+      }
+    },
   });
 
   console.log("Ling Agent — type your request, Ctrl+C to exit\n");
 
   // 触发 SessionStart Hook
-  const startResults = await hookEngine.trigger({
+  const startResults = await hooks.trigger({
     event: "SessionStart",
     sessionId: session.id,
     timestamp: Date.now(),
   });
-  reportHookFailures("SessionStart", startResults);
+  reportHookFailures(app, "SessionStart", startResults);
 
   while (true) {
     const historyTokens = estimateTokens(JSON.stringify(session.messages));
@@ -422,17 +335,17 @@ async function main() {
 
     // compact 命令: 手动触发压缩
     if (input.trim() === "/compact") {
-      session.messages = await compactor.compact(session.messages);
-      await sessionStore.save(session);
+      session.messages = await app.compactor.compact(session.messages);
+      await sessions.save(session);
       console.log("[ling] Conversation compacted.");
       continue;
     }
 
     try {
-      await agentLoop(input, session);
+      await agentLoop(input, session, app);
 
       // 每轮对话后自动保存
-      await sessionStore.save(session);
+      await sessions.save(session);
     } catch (err) {
       console.log(`Error: ${(err as Error).message}\n`);
     }

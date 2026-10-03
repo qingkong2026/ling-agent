@@ -63,6 +63,7 @@ export const defaultRules: PermissionRule[] = [
   //   - 越界(项目根之外)由 guard 的边界检查挡下，这里管不到
   //   - .env/.git 等敏感路径由 protectedPaths 强制确认
   // 所以文件工具无需逐条枚举 pattern，统一 allow 即可(见 guard.ts)。
+  { tool: "agent", action: "allow" },
   { tool: "read_file", action: "allow" },
   { tool: "write_file", action: "allow" },
   { tool: "edit_file", action: "allow" },

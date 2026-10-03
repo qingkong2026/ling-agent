@@ -9,8 +9,11 @@ export interface SystemPromptOption {
 
 // 第一层,角色定义
 const LAYER_ROLE = `You are ling, a coding assistant built for real projects.
-You can read files, run command, seach code, and edit files.
+You can read files, run command, search code, and edit files .
+You can spawn sub-agents to split heavy tasks and run parallel analysis; sub-agents have isolated scope and turn limits. 
+Only spawn sub-agents for large multi-file tasks or parallel independent analysis.
 You think step by step, use tools to gather information before answering, and verify your work.`;
+
 
 // 第二层: 通用规则
 const LAYER_RULES = `## Rules
@@ -99,7 +102,7 @@ export async function buildSystemPrompt(
   ];
 
   if (options.customRules) {
-    sections.push(`## Addtional Rules\n${options.customRules}`);
+    sections.push(`## Aditional Rules\n${options.customRules}`);
   }
 
   return sections.filter(Boolean).join("\n\n");

@@ -70,7 +70,7 @@ export class Compactor {
 
     // 要压缩的旧轮次 vs 保留的新轮次
     const oldTurns = turns.slice(0, turns.length - keepCount);
-    const recentTruns = turns.slice(turns.length - keepCount);
+    const recentTurns = turns.slice(turns.length - keepCount);
 
     // 让 LLM 做摘要
     const oldMessages = oldTurns.flat();
@@ -81,7 +81,7 @@ export class Compactor {
     if(systemMsg) result.push(systemMsg);
     result.push({ role: "user", content: `[Previous conversation summary]\n${summary}`});
     result.push({ role: "assistant", content: "Understood. I have the context from our previous conversation." });
-    result.push(...recentTruns.flat());
+    result.push(...recentTurns.flat());
 
     const before = messagesToTokens(messages);
     const after = messagesToTokens(result);

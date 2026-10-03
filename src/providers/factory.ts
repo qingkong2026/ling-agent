@@ -22,6 +22,7 @@ function loadConfigFile(): Partial<ProviderConfig> | null {
  * 配置优先级: 命令行参数 > 环境变量 > .ling.json > 默认值
  */
 export function resolveConfig(cliArgs?: Partial<ProviderConfig>): ProviderConfig {
+  // 1. 加载 .ling.json 配置文件
   const fileConfig = loadConfigFile();
 
   const provider = cliArgs?.provider
@@ -69,14 +70,18 @@ export function createProvider(config: ProviderConfig): LLMProvider {
   }
 }
 
-/** 一步到位,解析配置 + 创建 provider */
+/**
+ * 一步到位,解析配置 + 创建 provider
+ *
+ * 缺 key 时抛错而不是 process.exit: 创建路径必须能被宿主(测试 / SDK / CI)
+ * 捕获并自行决定怎么收场, 直接杀进程只在 CLI 边界上才是对的。
+ */
 export function initProvider(cliArgs?: Partial<ProviderConfig>): LLMProvider {
   const config = resolveConfig(cliArgs);
   if(!config.apiKey){
-    console.error(
-      `Error: No API key found. Set LING_API_KEY enviroment variable or add apiKey to .ling.json`,
+    throw new Error(
+      `No API key found. Set LING_API_KEY environment variable or add apiKey to .ling/.ling.json`,
     )
-    process.exit(1);
   }
   console.log(`[ling] Using ${config.provider} / ${config.model}`);
   return createProvider(config);

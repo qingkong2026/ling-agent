@@ -1,7 +1,4 @@
 // src/mcp-server/sqlite-server.ts — 一个最小的 SQLite MCP Server
-// 协议版本 2026-07-28：无会话、无握手，版本随每条请求的 _meta 走；
-// 用它自带的 server/discover 供客户端开场探测，tools/call 的每个结果都带 resultType
-// 暴露 list_tables / query 两个工具，全程只读
 
 import Database from "better-sqlite3";
 import { createInterface } from "node:readline";
@@ -23,7 +20,6 @@ const TOOLS: McpToolDefinition[] = [
   {
     name: "list_tables",
     description: "List all tables in the SQLite database",
-    // 无参数工具的规范推荐写法：明确只接受空对象
     inputSchema: { type: "object", additionalProperties: false },
   },
   {
@@ -106,7 +102,6 @@ function handleRequest(msg: IncomingMessage): JsonRpcResponse | null {
   const method = typeof msg.method === "string" ? msg.method : "";
 
   // 协议是无状态、无握手的：每条请求都必须自带 _meta 里的协议字段，
-  // 服务端不得从连接或先前的请求里推断这些信息。
   const meta = msg.params?._meta as Record<string, unknown> | undefined;
   const requested = meta?.["io.modelcontextprotocol/protocolVersion"];
   const clientCapabilities = meta?.["io.modelcontextprotocol/clientCapabilities"];
@@ -124,9 +119,6 @@ function handleRequest(msg: IncomingMessage): JsonRpcResponse | null {
     );
   }
 
-  // 版本不认识：必须回 -32022 UnsupportedProtocolVersionError 并带上 supported 列表，
-  // 客户端据此挑一个双方都支持的版本重试。server/discover 也不例外：
-  // 带 supported 的 -32022 正是它要的答案，客户端也能据此认出对面是现代服务端。
   if (requested !== PROTOCOL_VERSION) {
     return fail(id, -32022, "Unsupported protocol version", {
       supported: [PROTOCOL_VERSION],

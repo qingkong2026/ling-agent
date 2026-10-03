@@ -6,10 +6,10 @@ import { grepTool } from "./grep.js";
 import { globTool } from "./glob.js";
 import { bashTool } from "./bash.js";
 import { listFilesTool } from "./list-files.js";
-import { askUserTool } from "./ask-user.js";
+import { createAskUserTool, AskChannel } from "./ask-user.js";
 import { memoryTool } from "./memory.js"
 
-export function createToolRegistry(): ToolRegistry {
+export function createToolRegistry(opts: { host?: AskChannel } = {}): ToolRegistry {
   const registry = new ToolRegistry();
   registry.register(readFileTool);
   registry.register(writeFileTool);
@@ -18,11 +18,11 @@ export function createToolRegistry(): ToolRegistry {
   registry.register(globTool);
   registry.register(bashTool);
   registry.register(listFilesTool);
-  registry.register(askUserTool);
+  registry.register(createAskUserTool(opts.host ?? {}));
   registry.register(memoryTool);
   return registry;
 }
 
 export { ToolRegistry } from "./types.js";
-export { setAskUserFn } from "./ask-user.js";
-export type { AskFn } from "./ask-user.js"; 
+export type { AskFn, AskChannel } from "./ask-user.js";
+export  type { Tool } from "./types.js"; 
