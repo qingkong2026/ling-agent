@@ -25,8 +25,8 @@ export interface PermissionResult {
   reason?: string;
 }
 
-/** 工具调用上下文 - 权限守卫需要的信息 */
-export interface ToolCallContext {
+/** 权限检查的上下文 - 守卫需要的信息 */
+export interface PermissionCheckContext {
   toolName: string;
   params: Record<string, unknown>;
   /** 从参数中提取的关键字(命令字符串,文件路径等) */

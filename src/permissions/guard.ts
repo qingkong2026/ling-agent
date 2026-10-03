@@ -1,5 +1,5 @@
 import { resolve, isAbsolute, relative } from "path";
-import type { PermissionConfig, ToolCallContext } from "./types";
+import type { PermissionConfig, PermissionCheckContext } from "./types";
 import { evaluate, extractPrimaryArg } from "./matcher.js";
 import { extractPathCandidates, matchProtectedPath } from "./paths.js";
 
@@ -37,7 +37,7 @@ export class PermissionGuard {
     params: Record<string, unknown>,
   ): Promise<boolean> {
     const primaryArg = extractPrimaryArg(toolName, params);
-    const ctx: ToolCallContext = { toolName, params, primaryArg };
+    const ctx: PermissionCheckContext = { toolName, params, primaryArg };
 
     // 第一关: 文件系统边界检查
     const boundaryResult = this.checkBoundary(ctx);
@@ -70,7 +70,7 @@ export class PermissionGuard {
    * 文件系统边界检查
    * 返回 null -> 通过,返回字符串 = 拒绝原因
    */
-  private checkBoundary(ctx: ToolCallContext): string | null {
+  private checkBoundary(ctx: PermissionCheckContext): string | null {
     const root = this.config.projectRoot;
     if (!root) return null;
 
@@ -99,7 +99,7 @@ export class PermissionGuard {
   /**
    * 受保护路径检查
    */
-  private checkProtectedPath(ctx: ToolCallContext): string | null {
+  private checkProtectedPath(ctx: PermissionCheckContext): string | null {
     const patterns = this.config.protectedPaths;
     if (!patterns?.length) return null;
 

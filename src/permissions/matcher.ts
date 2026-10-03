@@ -1,7 +1,7 @@
 import { minimatch } from "minimatch";
 import type {
   PermissionRule,
-  ToolCallContext,
+  PermissionCheckContext,
   PermissionResult,
 } from "./types.js";
 
@@ -10,7 +10,7 @@ function matchTool(rule: PermissionRule, toolName: string): boolean {
   return rule.tool === toolName;
 }
 
-function matchPattern(rule: PermissionRule, ctx: ToolCallContext) {
+function matchPattern(rule: PermissionRule, ctx: PermissionCheckContext) {
   if (!rule.pattern) return true; // 没有 pattern 相当于匹配所有参数
   // bash 命令不是路径,用子串匹配更简单可预期;文件类工具仍用 glob
   if (ctx.toolName === "bash") return ctx.primaryArg.includes(rule.pattern);
@@ -61,7 +61,7 @@ export function extractPrimaryArg(
  */
 export function evaluate(
   rules: PermissionRule[],
-  ctx: ToolCallContext,
+  ctx: PermissionCheckContext,
 ): PermissionResult {
   // 第一轮 deny
   for (const rule of rules) {

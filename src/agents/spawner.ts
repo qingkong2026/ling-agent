@@ -6,7 +6,7 @@ import type {
   Message,
 } from "../providers/index.js";
 import { ToolRegistry } from "../tool/index.js";
-import type { Tool, ToolCallContext } from "../tool/index.js";
+import type { Tool, ToolExecContext } from "../tool/index.js";
 
 import type { SubAgentConfig, SubAgentResult } from "./types.js";
 import { resolveRole } from "./roles.js";
@@ -83,7 +83,7 @@ export class AgentSpawner {
     const allowedTools: ToolDefinition[] = [];
     const executors = new Map<
       string,
-      (params: Record<string, unknown>, ctx: ToolCallContext) => Promise<string>
+      (params: Record<string, unknown>, ctx: ToolExecContext) => Promise<string>
     >();
 
     for (const toolName of config.tools) {

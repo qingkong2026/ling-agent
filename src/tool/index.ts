@@ -25,4 +25,4 @@ export function createToolRegistry(opts: { host?: AskChannel } = {}): ToolRegist
 
 export { ToolRegistry } from "./types.js";
 export type { AskFn, AskChannel } from "./ask-user.js";
-export  type { Tool, ToolCallContext } from "./types.js";
+export  type { Tool, ToolExecContext } from "./types.js";

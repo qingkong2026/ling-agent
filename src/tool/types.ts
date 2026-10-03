@@ -3,8 +3,12 @@
 
 import type { ToolDefinition } from "../providers/types.js";
 
-/** 一次工具调用的执行上下文 */
-export interface ToolCallContext {
+/**
+ * 一次工具调用的执行上下文。
+ *
+ * toil_call_id, 用于还原调用链。
+ */
+export interface ToolExecContext {
   /** 对应 provider 返回的 ToolCall.id, 用于还原调用链 */
   toolCallId: string;
 }
@@ -13,7 +17,7 @@ export interface ToolCallContext {
 export interface Tool extends ToolDefinition {
   execute(
     params: Record<string, unknown>,
-    ctx: ToolCallContext,
+    ctx: ToolExecContext,
   ): Promise<string>;
 }
 
@@ -38,7 +42,7 @@ export class ToolRegistry {
   async execute(
     name: string,
     params: Record<string, unknown>,
-    ctx: ToolCallContext,
+    ctx: ToolExecContext,
   ): Promise<string> {
     const tool = this.get(name);
     if(!tool){
