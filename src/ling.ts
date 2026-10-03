@@ -24,6 +24,7 @@ import {
   HookContext,
   HookResult,
 } from "./hooks/index.js";
+import { loadMcpServers, shutdownMcpServers } from "./mcp/index.js";
 
 const CONTEXT_WINDOW = parseInt(process.env.CONTEXT_WINDOW || "32000", 10);
 
@@ -53,9 +54,7 @@ const hooksConfig = await loadHooksConfig(projectRoot);
 hookEngine.load(hooksConfig);
 
 /**
- * hook 失败会被当成"没有拦截"而放行(PreToolUse)或悄悄没执行(PostToolUse),
- * 这里把失败告诉用户。hook 是辅助能力, 不该影响工具调用的主流程,
- * 所以只提醒、不拦截。
+ * hook 失败提醒
  */
 function reportHookFailures(
   event: HookContext["event"],
@@ -330,6 +329,30 @@ async function main() {
     console.log(`New session: ${session.id.slice(0, 8)}`);
   }
 
+  // 加载 MCP server
+  const { clients: mcpClients, tools: mcpTools } = await loadMcpServers(projectRoot);
+  // 重名只跳过并告警：ToolRegistry.register 会抛，不能因为一个坏 server
+  // 把整个 agent 拦在启动阶段
+  for (const tool of mcpTools) {
+    if (toolRegistry.get(tool.name)) {
+      console.error(`[mcp] 工具 ${tool.name} 与已注册工具重名，已跳过`);
+      continue;
+    }
+    toolRegistry.register(tool);
+  }
+
+  // 退出时收掉 MCP 子进程, 否则它们会被 reparent 留在系统里
+  let shuttingDown = false;
+  async function shutdown(code: number): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await shutdownMcpServers(mcpClients).catch(() => {});
+    process.exit(code);
+  }
+  // 挂了 SIGINT handler 后必须显式 exit, 否则 Ctrl+C 不再能终止进程
+  process.on("SIGINT", () => void shutdown(130));
+  process.on("SIGTERM", () => void shutdown(0));
+
   // 初始化上下文环境: system prompt 是派生状态, 每次启动重建, 拼到会话最前面
   const systemPrompt = await buildSystemPrompt({ cwd: projectRoot });
   session.messages = [
@@ -416,6 +439,12 @@ async function main() {
   }
 
   rl.close();
+  await shutdown(0);
 }
 
-main();
+// 兜底：main 里任何漏网的 rejection 都该变成一条可读的错误，
+// 而不是 Node 的 unhandled rejection 崩溃
+main().catch((err) => {
+  console.error(`Fatal: ${(err as Error).message}`);
+  process.exit(1);
+});

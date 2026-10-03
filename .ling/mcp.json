@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sqlite": {
+      "command": "npx",
+      "args": ["tsx", "src/mcp-server/sqlite-server.ts", "./data/mydb.sqlite"]
+    }
+  }
+}
