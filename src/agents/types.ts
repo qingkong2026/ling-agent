@@ -1,7 +1,5 @@
 // src/agents/types.ts 子 Agent 的类型定义
 
-import type { ToolDefinition } from "../providers/index.js";
-
 /** 子 Agent 配置 */
 export interface SubAgentConfig {
   /** 子 Agent 名称，用于日志和结果追踪 */
@@ -30,4 +28,9 @@ export interface SubAgentResult {
   durationMs: number;
   /** 失败时的错误信息 */
   error?: string;
+  /**
+   * 拉起这个子 Agent 的那次工具调用的 id (父级 tool_use id), 用于还原调用链。
+   * 顶层直接调用(如 scheduler)时为 undefined。
+   */
+  parentToolCallId?: string;
 }

@@ -3,9 +3,18 @@
 
 import type { ToolDefinition } from "../providers/types.js";
 
+/** 一次工具调用的执行上下文 */
+export interface ToolCallContext {
+  /** 对应 provider 返回的 ToolCall.id, 用于还原调用链 */
+  toolCallId: string;
+}
+
 /** 可执行工具：在给模型看的工具声明之上，多了 execute 实现 */
 export interface Tool extends ToolDefinition {
-  execute(params: Record<string, unknown>): Promise<string>;
+  execute(
+    params: Record<string, unknown>,
+    ctx: ToolCallContext,
+  ): Promise<string>;
 }
 
 export class ToolRegistry {
@@ -26,12 +35,16 @@ export class ToolRegistry {
     return Array.from(this.tools.values());
   }
 
-  async execute(name: string, params: Record<string, unknown>): Promise<string> {
+  async execute(
+    name: string,
+    params: Record<string, unknown>,
+    ctx: ToolCallContext,
+  ): Promise<string> {
     const tool = this.get(name);
     if(!tool){
       throw new Error(`Unknown tool: "${name}"`);
     }
-    return tool.execute(params);
+    return tool.execute(params, ctx);
   }
 
   // 只保留给模型看的声明部分，转换为适配器统一的工具格式

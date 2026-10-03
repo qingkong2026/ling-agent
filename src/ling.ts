@@ -152,7 +152,9 @@ async function agentLoop(query: string, session: Session, app: LingApp) {
       let success = true;
 
       try {
-        result = await registry.execute(toolName, params);
+        result = await registry.execute(toolName, params, {
+          toolCallId: tc.id,
+        });
       } catch (err) {
         result = `Error: ${(err as Error).message}`;
         success = false;

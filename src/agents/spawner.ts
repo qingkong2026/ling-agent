@@ -5,7 +5,8 @@ import type {
   ToolDefinition,
   Message,
 } from "../providers/index.js";
-import { ToolRegistry, Tool } from "../tool/index.js";
+import { ToolRegistry } from "../tool/index.js";
+import type { Tool, ToolCallContext } from "../tool/index.js";
 
 import type { SubAgentConfig, SubAgentResult } from "./types.js";
 import { resolveRole } from "./roles.js";
@@ -40,7 +41,7 @@ export function buildAgentTool(spawner: AgentSpawner): Tool {
       },
       required: ["role", "task"],
     },
-    async execute(params) {
+    async execute(params, ctx) {
       const role = params.role as string;
       const task = params.task as string;
       const name = (params.name as string) || `${role}-agent`;
@@ -48,7 +49,10 @@ export function buildAgentTool(spawner: AgentSpawner): Tool {
       const config = resolveRole(role, name, task);
       if (!config) return `Unknown role: ${role}`;
 
-      const result = await spawner.spawn(config, task);
+      // 把本次调用的 id 传给子 Agent, 它的结果里会带上父指针
+      const result = await spawner.spawn(config, task, {
+        parentToolCallId: ctx.toolCallId,
+      });
       return result.success
         ? result.output
         : `[${result.name}] Failed: ${result.error}\n${result.output}`;
@@ -66,15 +70,20 @@ export class AgentSpawner {
   }
 
   /** 启动一个子 Agent, 返回其最终输出 */
-  async spawn(config: SubAgentConfig, task: string): Promise<SubAgentResult> {
+  async spawn(
+    config: SubAgentConfig,
+    task: string,
+    opts: { parentToolCallId?: string } = {},
+  ): Promise<SubAgentResult> {
     const startTime = Date.now();
     const maxTurns = config.maxTurns ?? DEFAULT_MAX_TURNS;
+    const parentToolCallId = opts.parentToolCallId;
 
     // 1.从全局工具表中过滤出 Agent 允许用的工具
     const allowedTools: ToolDefinition[] = [];
     const executors = new Map<
       string,
-      (params: Record<string, unknown>) => Promise<string>
+      (params: Record<string, unknown>, ctx: ToolCallContext) => Promise<string>
     >();
 
     for (const toolName of config.tools) {
@@ -92,7 +101,7 @@ export class AgentSpawner {
     ];
 
     console.log(
-      `\n[${config.name}] Started (provider=${this.provider.name}, tools=${config.tools.join(",")})`,
+      `\n[${config.name}] Started (provider=${this.provider.name}, tools=${config.tools.join(",")}, parent=${parentToolCallId ?? "main"})`,
     );
 
     let turns = 0;
@@ -122,6 +131,7 @@ export class AgentSpawner {
             output: response.content ?? "",
             turns,
             durationMs: Date.now() - startTime,
+            parentToolCallId,
           };
         }
 
@@ -142,11 +152,11 @@ export class AgentSpawner {
           }
 
           console.log(
-            `[${config.name}] ${toolName}(${tc.arguments.slice(0, 100)})`,
+            `[${config.name}] ${toolName} id=${tc.id} (${tc.arguments.slice(0, 100)})`,
           );
 
-          // 执行工具调用
-          const result = await executor(params);
+          // 执行工具调用; 把本次调用的 id 传下去, 子 Agent 再 spawn 时才能接上链路
+          const result = await executor(params, { toolCallId: tc.id });
           messages.push({
             role: "tool",
             toolCallId: tc.id,
@@ -164,6 +174,7 @@ export class AgentSpawner {
         turns,
         durationMs: Date.now() - startTime,
         error: `Exceeded ${maxTurns} turns`,
+        parentToolCallId,
       };
     } catch (err) {
       return {
@@ -173,6 +184,7 @@ export class AgentSpawner {
         turns,
         durationMs: Date.now() - startTime,
         error: err instanceof Error ? err.message : String(err),
+        parentToolCallId,
       };
     }
   }
