@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": { "type": "string", "description": "一句话总结" },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "number" },
+          "severity": { "type": "string", "enum": ["low", "medium", "high"] },
+          "message": { "type": "string" }
+        },
+        "required": ["file", "severity", "message"]
+      }
+    },
+    "approved": { "type": "boolean" }
+  },
+  "required": ["summary", "issues", "approved"]
+}
