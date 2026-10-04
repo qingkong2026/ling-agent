@@ -24,10 +24,14 @@ const LAYER_RULES = `## Rules
 - If a task is ambiguous, ask the use to clarify instead of guessing.`;
 
 // 第三层: 从项目实际状态动态生成
-function buildProjectLayer(project: ProjectInfo): string {
+function buildProjectLayer(project: ProjectInfo, cwd: string): string {
   const parts: string[] = ["## Project Context"];
 
-  parts.push(`Working directory: ${project.name}`);
+  // 这里要给绝对路径, 不是 project.name。只给个 basename(ling-agent),
+  // 模型定位不了自己在哪, 会自己瞎编一个(实测编成 /home/user/ling-agent),
+  // 再叠一层 `cd xxx || cd $(pwd)` 自保 —— 一堆多余的 cd 就是这么来的。
+  parts.push(`Working directory: ${cwd}`);
+  parts.push(`Project: ${project.name}`);
   parts.push(`Type: ${project.type} (${project.techStack.join(", ")})`);
 
   if (project.description) {
@@ -75,7 +79,7 @@ async function buildMemoryLayer(): Promise<string> {
   const memoryContext = await memoryStore.loadForContext();
   const parts: string[] = [];
   if (memoryContext) {
-    console.log(
+    console.error(
       `Loaded ${memoryContext.split("\n").length} lines of memory context.`,
     );
     parts.push("## Memory");
@@ -96,7 +100,7 @@ export async function buildSystemPrompt(
   const sections = [
     LAYER_ROLE,
     LAYER_RULES,
-    buildProjectLayer(project),
+    buildProjectLayer(project, options.cwd),
     buildLingMdLayer(lingMds),
     memoryLayer,
   ];

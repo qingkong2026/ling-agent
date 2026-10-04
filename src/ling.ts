@@ -1,7 +1,4 @@
 // src/ling.ts — REPL 入口
-//
-// 组件的创建全部交给 createConfig()(见 ./config/config.ts), 这里只负责:
-// 解析启动意图(恢复/新建会话)、把宿主 I/O(readline)接上去、跑主循环。
 
 import * as readline from "readline/promises";
 import { calculateBudget, estimateTokens } from "./context/index.js";
@@ -11,6 +8,31 @@ import { createConfig, detectMetadata } from "./config/config.js";
 import type { LingApp } from "./config/config.js";
 import type { Session } from "./session/index.js";
 import type { HookContext, HookResult } from "./hooks/index.js";
+import { parseCli, readStdin, runPrintMode } from "./cli/index.js";
+
+const VERSION = "0.1.0";
+
+const HELP = `
+Ling - AI Coding Agent
+ 
+Usage:
+  ling [options]                  Start interactive REPL
+  ling -p "query"                 Non-interactive mode
+  cat file | ling -p "analyze"    Pipe input + query
+ 
+Options:
+  -p, --print <query>    Non-interactive mode, print result and exit
+  -f, --format <fmt>     Output format: text (default), json, stream
+      --schema <file>    Constrain output with JSON Schema
+      --provider <name>  LLM provider (default: deepseek)
+  -m, --model <name>     Model name (default: deepseek-flash)
+      --max-turns <n>    Max agent loop turns (default: 20)
+  -c, --continue         Resume last session
+  -r, --resume <id>      Resume specific session
+  -n, --name <name>      Name the session
+  -h, --help             Show this help
+  -v, --version          Show version
+`;
 
 /**
  * hook 失败提醒
@@ -40,7 +62,8 @@ async function agentLoop(query: string, session: Session, app: LingApp) {
     session.messages = await compactor.compact(session.messages);
   }
 
-  const MAX_TURNS = 20;
+  // 跟非交互模式共用同一个 --max-turns, 免得同名的 flag 只在一边生效
+  const MAX_TURNS = app.cliArgs.maxTurns;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     renderer.reset();
     const collector = new ToolCallCollector();
@@ -100,12 +123,14 @@ async function agentLoop(query: string, session: Session, app: LingApp) {
       }
 
       // ---- 权限检查：在执行前拦截 ----
-      const allowed = await guard.check(toolName, params);
-      if (!allowed) {
+      const decision = await guard.check(toolName, params);
+      if (!decision.allowed) {
+        // 带上原因, 模型才知道该换个什么法子, 而不是盲目重试同一条命令
+        const reason = decision.reason ?? "blocked by the permission system";
         session.messages.push({
           role: "tool",
           toolCallId: tc.id,
-          content: `Permission denied: this operation was blocked by the permission system. Try a different approach.`,
+          content: `Permission denied: ${reason}. Try a different approach.`,
         });
         continue; // 跳过执行，但不中断
       }
@@ -184,6 +209,24 @@ async function agentLoop(query: string, session: Session, app: LingApp) {
 
 // === 入口 ===
 async function main() {
+
+  let earlyArgs;
+  try {
+    earlyArgs = parseCli(process.argv.slice(2));
+  } catch (err) {
+    // 参数非法和配置错误一样, 都在 CLI 边界收敛成退出码
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
+  if (earlyArgs.help) {
+    console.log(HELP);
+    process.exit(0);
+  }
+  if (earlyArgs.version) {
+    console.log(`ling v${VERSION}`);
+    process.exit(0);
+  }
+
   let app: LingApp;
   try {
     app = await createConfig();
@@ -204,6 +247,7 @@ async function main() {
     sessions,
     hooks,
     systemPrompt,
+    provider,
   } = app;
 
   // --list-sessions: 打印后退出
@@ -226,6 +270,29 @@ async function main() {
     return;
   }
 
+  // --- 非交互模式 ---
+  // 用 !== undefined 判断: -p "" 也是显式请求非交互模式, 不该掉回 REPL
+  if (cliArgs.print !== undefined) {
+    // 检查是否有 stdin 管道输入
+    const stdinContent = await readStdin();
+    let query = cliArgs.print;
+
+    if (stdinContent) {
+      // 把 stdin 内容拼进 query
+      query = `${stdinContent}\n\n---\n\n${query}`;
+    }
+
+    // try/finally: 出错(如 401)时同样要收掉 MCP 子进程, 否则被 reparent 留在系统里。
+    // runPrintMode 只回退出码、不自己 exit, 就是为了让这个 finally 一定跑到。
+    let exitCode = 0;
+    try {
+      exitCode = await runPrintMode(app, query, cliArgs, provider);
+    } finally {
+      await app.shutdown().catch(() => {});
+    }
+    process.exit(exitCode);
+  }
+
   // 决定是新建还是恢复会话
   let session: Session;
 
@@ -233,7 +300,14 @@ async function main() {
     const latestId = await sessions.getLatestId();
     if (!latestId) {
       console.log("No previous session found. Starting new session.");
-      session = await sessions.create(detectMetadata(projectRoot, providerConfig), cliArgs.name);
+      session = await sessions.create(
+        detectMetadata(
+          projectRoot,
+          providerConfig.provider,
+          providerConfig.model,
+        ),
+        cliArgs.name,
+      );
     } else {
       session = (await sessions.load(latestId))!;
       console.log(
@@ -252,7 +326,14 @@ async function main() {
       `Resuming session ${session.id.slice(0, 8)}... (${session.messages.length} messages)`,
     );
   } else {
-    session = await sessions.create(detectMetadata(projectRoot, providerConfig), cliArgs.name);
+    session = await sessions.create(
+      detectMetadata(
+        projectRoot,
+        providerConfig.provider,
+        providerConfig.model,
+      ),
+      cliArgs.name,
+    );
     console.log(`New session: ${session.id.slice(0, 8)}`);
   }
 
@@ -315,7 +396,7 @@ async function main() {
     },
   });
 
-  console.log("Ling Agent — type your request, Ctrl+C to exit\n");
+  console.log(`Ling Agent v${VERSION}\n`);
 
   // 触发 SessionStart Hook
   const startResults = await hooks.trigger({
@@ -357,8 +438,6 @@ async function main() {
   await shutdown(0);
 }
 
-// 兜底：main 里任何漏网的 rejection 都该变成一条可读的错误，
-// 而不是 Node 的 unhandled rejection 崩溃
 main().catch((err) => {
   console.error(`Fatal: ${(err as Error).message}`);
   process.exit(1);

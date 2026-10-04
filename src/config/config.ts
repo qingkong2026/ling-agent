@@ -9,6 +9,8 @@
 
 import { initProvider, resolveConfig, StreamRenderer } from "../providers/index.js";
 import type { LLMProvider, ProviderConfig } from "../providers/index.js";
+import { parseCli } from "../cli/parser.js";
+import type { CliOptions } from "../cli/parser.js";
 import { createToolRegistry } from "../tool/index.js";
 import type { ToolRegistry, AskChannel, AskFn } from "../tool/index.js";
 import { buildSystemPrompt, Compactor, getGitBranch } from "../context/index.js";
@@ -19,14 +21,6 @@ import type { SessionMetadata } from "../session/index.js";
 import { HookEngine, loadHooksConfig } from "../hooks/index.js";
 import { loadMcpServers, shutdownMcpServers } from "../mcp/index.js";
 import { AgentSpawner, buildAgentTool } from "../agents/index.js";
-
-/** CLI 参数解析 */
-export interface CliArgs {
-  continue: boolean; // --continue：恢复最近一次会话
-  resume?: string; // --resume <id>：恢复指定会话
-  name?: string; // --name <name>：给会话命名
-  listSessions: boolean; // --list-sessions：列出历史
-}
 
 /**
  * 宿主交互通道。REPL 用自己那一个 readline 实现它, SDK 走自己的通道,
@@ -44,11 +38,18 @@ export interface CreateConfigOptions {
   projectRoot?: string;
   /** 上下文窗口 token 数。默认读 CONTEXT_WINDOW 环境变量 */
   contextWindow?: number;
+  /**
+   * 是否存在交互通道(能否回填 HostIO)。REPL 为 true, CI / SDK 为 false。
+   * 默认按命令行推断: 传了 -p 就是非交互。传了(或没传)这个值以显式值为准。
+   */
+  interactive?: boolean;
 }
 
 export interface LingApp {
-  cliArgs: CliArgs;
-  providerConfig: Partial<ProviderConfig>;
+  /** CLI 解析结果(见 cli/parser.ts), 交互与非交互两种入口共用 */
+  cliArgs: CliOptions;
+  /** 解析后的实际配置 —— 优先级链已走完, 记录环境(会话元信息等)用它 */
+  providerConfig: ProviderConfig;
   projectRoot: string;
   contextWindow: number;
 
@@ -69,54 +70,12 @@ export interface LingApp {
   shutdown(): Promise<void>;
 }
 
-// === 解析命令行参数 ===
-export function parseArgs(argv: string[]): {
-  cliArgs: CliArgs;
-  providerConfig: Partial<ProviderConfig>;
-} {
-  const providerConfig: Partial<ProviderConfig> = {};
-  const cliArgs: CliArgs = { continue: false, listSessions: false };
-
-  for (let i = 0; i < argv.length; i++) {
-    switch (argv[i]) {
-      case "--provider":
-      case "-p":
-        providerConfig.provider = argv[++i] as ProviderConfig["provider"];
-        break;
-      case "--model":
-      case "-m":
-        providerConfig.model = argv[++i];
-        break;
-      case "--continue":
-      case "-c":
-        cliArgs.continue = true;
-        break;
-      case "--resume":
-      case "-r":
-        cliArgs.resume = argv[++i];
-        break;
-      case "--name":
-      case "-n":
-        cliArgs.name = argv[++i];
-        break;
-      case "--list-sessions":
-      case "-l":
-        cliArgs.listSessions = true;
-        break;
-      default:
-        break;
-    }
-  }
-
-  return { cliArgs, providerConfig };
-}
-
 // 会话元信息: 只在创建时写入, 记录这次对话发生的环境
 export function detectMetadata(
   projectRoot: string,
-  providerConfig: Partial<ProviderConfig>,
+  provider: string,
+  model: string,
 ): SessionMetadata {
-  const { provider, model } = resolveConfig(providerConfig);
   return {
     cwd: projectRoot,
     provider,
@@ -138,19 +97,29 @@ export async function createConfig(
   const contextWindow =
     opts.contextWindow ?? parseInt(process.env.CONTEXT_WINDOW || "32000", 10);
 
-  const { cliArgs, providerConfig } = parseArgs(
-    opts.argv ?? process.argv.slice(2),
-  );
+  // 命令行解析统一走 cli 模块。
+  const cliArgs = parseCli(opts.argv ?? process.argv.slice(2));
+
+  const providerConfig = resolveConfig({
+    provider: cliArgs.provider as ProviderConfig["provider"] | undefined,
+    model: cliArgs.model,
+  });
 
   // 宿主通道槽位: 先建空壳, attachHostIO 时回填。
   // 工具在 execute 时才读它, 所以回填晚于注册也没问题。
   const host: AskChannel = {};
 
   const provider = initProvider(providerConfig);
-  const registry = createToolRegistry({ host });
+  // 显式值优先, 否则按是否传了 -p 推断(REPL 之外的入口可以自己指定)
+  const interactive = opts.interactive ?? cliArgs.print === undefined;
+  const registry = createToolRegistry({ host, interactive });
   const permissionConfig = loadPermissionConfig(projectRoot);
-  // 先不传 confirmFn: 未注入交互通道时保持"需要确认即拒绝"的原有语义
-  const guard = new PermissionGuard(permissionConfig);
+  // 先不传 confirmFn: 等 attachHostIO 回填。
+  // 但 interactive 要现在就给 —— 非交互时没有通道可问, guard 需要据此把
+  // "需要确认"降级为放行(危险命令仍由 deny 规则兜底), 否则 -p 模式寸步难行。
+  const guard = new PermissionGuard(permissionConfig, undefined, {
+    interactive,
+  });
   const renderer = new StreamRenderer();
   const sessions = new SessionStore();
   const compactor = new Compactor(provider, {

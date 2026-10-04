@@ -14,15 +14,28 @@ import type { PermissionRule } from "./types.js";
  */
 export const defaultRules: PermissionRule[] = [
   // DENY: 绝对禁止的危险操作(按子串匹配)
+
   {
     tool: "bash",
-    pattern: "rm -rf /",
+    pattern: "rm -rf / ",
     action: "deny",
     reason: "Refusing to rm -rf root",
   },
   {
     tool: "bash",
-    pattern: "rm -rf ~",
+    pattern: "rm -rf /*",
+    action: "deny",
+    reason: "Refusing to rm -rf root",
+  },
+  {
+    tool: "bash",
+    pattern: "rm -rf ~ ",
+    action: "deny",
+    reason: "Refusing to rm -rf home",
+  },
+  {
+    tool: "bash",
+    pattern: "rm -rf ~/*",
     action: "deny",
     reason: "Refusing to rm -rf home",
   },
@@ -40,7 +53,7 @@ export const defaultRules: PermissionRule[] = [
   },
   {
     tool: "bash",
-    pattern: "chmod -R 777 /",
+    pattern: "chmod -R 777 / ",
     action: "deny",
     reason: "Mass permission change blocked",
   },
@@ -56,13 +69,21 @@ export const defaultRules: PermissionRule[] = [
     action: "deny",
     reason: "Piping remote script to shell blocked",
   },
+  {
+    tool: "bash",
+    pattern: "|& bash",
+    action: "deny",
+    reason: "Piping remote script to shell blocked",
+  },
+  {
+    tool: "bash",
+    pattern: "|& sh",
+    action: "deny",
+    reason: "Piping remote script to shell blocked",
+  },
 
   // ALLOW: 文件读写 + 安全的只读/开发命令
-  //
-  // 文件工具按「当前目录内直接放行」处理：
-  //   - 越界(项目根之外)由 guard 的边界检查挡下，这里管不到
-  //   - .env/.git 等敏感路径由 protectedPaths 强制确认
-  // 所以文件工具无需逐条枚举 pattern，统一 allow 即可(见 guard.ts)。
+
   { tool: "agent", action: "allow" },
   { tool: "read_file", action: "allow" },
   { tool: "write_file", action: "allow" },
@@ -75,9 +96,28 @@ export const defaultRules: PermissionRule[] = [
   { tool: "bash", pattern: "head ", action: "allow" },
   { tool: "bash", pattern: "tail ", action: "allow" },
   { tool: "bash", pattern: "wc ", action: "allow" },
+  { tool: "bash", pattern: "grep ", action: "allow" },
+  { tool: "bash", pattern: "echo ", action: "allow" },
+  { tool: "bash", pattern: "pwd ", action: "allow" },
+  { tool: "bash", pattern: "cd ", action: "allow" },
+  { tool: "bash", pattern: "which ", action: "allow" },
+  { tool: "bash", pattern: "diff ", action: "allow" },
+  { tool: "bash", pattern: "stat ", action: "allow" },
+  { tool: "bash", pattern: "du ", action: "allow" },
+  // 刻意不放 `find `: find 的 -exec / -delete 是执行和删除原语,
+  // 一旦放行就等于从规则层整个漏出去(CC 有沙箱兜底, ling 没有)
   { tool: "bash", pattern: "git status", action: "allow" },
   { tool: "bash", pattern: "git log", action: "allow" },
   { tool: "bash", pattern: "git diff", action: "allow" },
+  // 这几个子命令无论带什么参数都是只读的，可以放心 allow。
+  // 但 `git branch` / `git remote` / `git tag` 不在其列 —— 它们不带参数时
+  // 是列出，带参数就是改仓库(-d/-D/-m/-f)，而子串匹配分不出这两种，
+  // 所以宁可不放。要放就得先加一串 deny 把它们按在最前面。
+  { tool: "bash", pattern: "git show", action: "allow" },
+  { tool: "bash", pattern: "git blame", action: "allow" },
+  { tool: "bash", pattern: "git rev-parse", action: "allow" },
+  { tool: "bash", pattern: "git ls-files", action: "allow" },
+  { tool: "bash", pattern: "git describe", action: "allow" },
   { tool: "bash", pattern: "npm run ", action: "allow" },
   { tool: "bash", pattern: "npm test", action: "allow" },
   { tool: "bash", pattern: "npx tsc", action: "allow" },
@@ -92,6 +132,10 @@ export const defaultRules: PermissionRule[] = [
 export const defaultProtectedPaths = [
   ".git/**",
   "**/.env*",
+  // 凭证文件按「名字」保护, 不按目录: .ling/ 下还有 mcp.json / hooks.json 等
+  // 工具配置, 那些是应该让 agent 自己读的, 整目录保护会连带挡住它们。
+  // 按名字匹配还有个好处 —— 文件挪到项目外也照样命中(实测 **/*.ling.json 能匹配绝对路径)
+  "**/*.ling.json",
   ".claude/**",
   ".vscode/**",
   "node_modules/**",

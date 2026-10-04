@@ -9,7 +9,9 @@ import { listFilesTool } from "./list-files.js";
 import { createAskUserTool, AskChannel } from "./ask-user.js";
 import { memoryTool } from "./memory.js"
 
-export function createToolRegistry(opts: { host?: AskChannel } = {}): ToolRegistry {
+export function createToolRegistry(
+  opts: { host?: AskChannel; interactive?: boolean } = {},
+): ToolRegistry {
   const registry = new ToolRegistry();
   registry.register(readFileTool);
   registry.register(writeFileTool);
@@ -18,7 +20,10 @@ export function createToolRegistry(opts: { host?: AskChannel } = {}): ToolRegist
   registry.register(globTool);
   registry.register(bashTool);
   registry.register(listFilesTool);
-  registry.register(createAskUserTool(opts.host ?? {}));
+  // 非交互模式(CI / SDK)下不注册 ask_user
+  if (opts.interactive !== false) {
+    registry.register(createAskUserTool(opts.host ?? {}));
+  }
   registry.register(memoryTool);
   return registry;
 }

@@ -79,7 +79,7 @@ export async function loadMcpServers(projectRoot: string): Promise<{
     }
   }
 
-  console.log(
+  console.error(
     `[mcp] ${clients.length} server(s), ${tools.length} tool(s) total`
   );
   return { clients, tools };

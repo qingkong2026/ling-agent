@@ -16,7 +16,7 @@ export class HookEngine {
   /** 从配置加载所有规则 */
   load(config: HooksConfig): void {
     this.rules = config.hooks;
-    console.log(`[hooks] Loaded ${this.rules.length} hooks`);
+    console.error(`[hooks] Loaded ${this.rules.length} hooks`);
   }
 
   /** 手动注册一条规则 */

@@ -122,7 +122,7 @@ export class McpClient {
     });
 
     proc.on("exit", (code) => {
-      console.log(`[MCP:${this.serverName}] Server exited, code=${code}`);
+      console.error(`[MCP:${this.serverName}] Server exited, code=${code}`);
       if (this.process === proc) this.process = null;
       this.cleanupPending(new Error(`Server exited, code=${code}`));
     });
@@ -133,7 +133,7 @@ export class McpClient {
     this.serverCapabilities = discoverResult.capabilities;
     const listRes = await this.toolsList();
     this.tools = listRes.tools;
-    console.log(`[MCP:${this.serverName}] Connected, loaded ${this.tools.length} tools`);
+    console.error(`[MCP:${this.serverName}] Connected, loaded ${this.tools.length} tools`);
   }
 
   /**

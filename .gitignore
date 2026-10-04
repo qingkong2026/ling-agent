@@ -39,7 +39,6 @@ build
 .env.test.local
 .env.production.local
 
-# .ling.json
 *.ling.json
 
 # npm lock file（可选，建议保留，不忽略）
