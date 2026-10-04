@@ -5,9 +5,17 @@
   "license": "ISC",
   "author": "",
   "type": "module",
+  "bin": {
+    "ling": "./bin/ling"
+  },
+  "files": [
+    "bin/",
+    "dist/"
+  ],
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "npx tsx src/ling.ts",
+    "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
